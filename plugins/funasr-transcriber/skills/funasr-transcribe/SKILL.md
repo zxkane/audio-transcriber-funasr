@@ -38,6 +38,29 @@ merges consecutive utterances, and maps speaker IDs to real names.
 
 All presets include **speaker diarization** (CAM++) and **VAD** (FSMN).
 
+## Workflow
+
+Before starting transcription, **always ask the user** the following:
+
+1. **Audio file** — path to the recording (required)
+2. **Language** — what language is the meeting in? (default: Chinese)
+3. **Number of speakers** — how many participants? (improves diarization)
+4. **Supporting files** — ask:
+   > "Do you have any of the following to improve transcription accuracy?"
+   > - **Attendee list / participant names** — used for hotwords and speaker mapping
+   > - **Meeting agenda or topic list** — used for hotwords (project names, terms)
+   > - **Reference documents** (monthly reviews, prior meeting notes, etc.) — used to identify speakers via keyword matching after transcription
+   >
+   > These are optional but significantly improve speaker identification
+   > and domain-specific term recognition.
+
+If the user provides supporting materials:
+- Extract participant names and key terms → create `hotwords.txt`
+- Extract per-person context → create `speaker-context.json`
+- Use both with `--hotwords` and `--speaker-context` flags
+
+If no supporting files are available, proceed with `--num-speakers` only.
+
 ## Quick Start
 
 ### 1. Environment Setup

@@ -13,17 +13,20 @@ Claude Code plugin for multi-speaker meeting transcription with automatic speake
 
 ## Installation
 
-### As Claude Code Plugin
+### As Agent Skill (via [skills.sh](https://skills.sh))
 
 ```bash
 npx skills add zxkane/meeting-transcriber
 ```
 
-Or reference directly:
+### As Claude Code Plugin
+
+Add as a marketplace, then install:
 
 ```bash
-git clone https://github.com/zxkane/meeting-transcriber.git
-# Use with --plugin-dir or add to Claude Code settings
+# In Claude Code
+/plugin marketplace add zxkane/meeting-transcriber
+/plugin install funasr-transcriber@zxkane-meeting-transcriber
 ```
 
 ### Manual Usage

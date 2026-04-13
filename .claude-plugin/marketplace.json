@@ -1,0 +1,9 @@
+{
+  "name": "audio-transcriber-funasr",
+  "version": "1.0.0",
+  "description": "Chinese audio transcription with FunASR (Paraformer-large + CAM++ speaker diarization) and LLM cleanup. Supports GPU and CPU.",
+  "author": "zxkane",
+  "license": "MIT",
+  "homepage": "https://github.com/zxkane/meeting-transcriber",
+  "tags": ["audio", "transcription", "funasr", "chinese", "speech-to-text", "speaker-diarization", "meeting-minutes"]
+}

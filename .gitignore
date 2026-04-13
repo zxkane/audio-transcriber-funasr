@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Audio files (too large for git)
+*.wav
+*.m4a
+*.mp3
+*.ogg
+*.flac
+
+# Transcription outputs (generated, large)
+output/
+
+# Monthly review source docs (private)
+202604-*/
+
+# FunASR model cache
+*.cache/
+
+# Claude Code local files
+*.local.*
+.local.json
+CLAUDE.local.md
+.env
+.env.*
+.claude/settings.local.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Other agent tools
+.agents/
+.kiro/
+.trae/
+.windsurf/
+
+# skills.sh lock file (we manage skills in-repo now)
+skills-lock.json
+
+# Temp files
+tmp/
+*.tmp
+*_llm_cache/
+*_chunks/

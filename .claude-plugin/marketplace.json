@@ -4,6 +4,6 @@
   "description": "Multi-language meeting and podcast transcription with FunASR (Paraformer + CAM++ speaker diarization) and LLM cleanup. Supports 99 languages, GPU and CPU.",
   "author": "zxkane",
   "license": "MIT",
-  "homepage": "https://github.com/zxkane/meeting-transcriber",
+  "homepage": "https://github.com/zxkane/audio-transcriber-funasr",
   "tags": ["audio", "transcription", "funasr", "chinese", "speech-to-text", "speaker-diarization", "meeting-minutes", "podcast", "interview", "whisper", "multilingual"]
 }

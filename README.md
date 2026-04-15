@@ -1,15 +1,15 @@
-# FunASR Meeting Transcriber
+# FunASR Audio Transcriber
 
-Claude Code plugin for multi-speaker meeting transcription with automatic speaker diarization and LLM cleanup, powered by [FunASR](https://github.com/modelscope/FunASR).
+Claude Code plugin for multi-speaker meeting and podcast transcription with automatic speaker diarization and LLM cleanup, powered by [FunASR](https://github.com/modelscope/FunASR).
 
 ## Features
 
-- **Multi-speaker meetings** — CAM++ speaker diarization separates who said what, with `--num-speakers` hint, real name mapping, and speaker context for LLM identification
+- **Meetings & podcasts** — Handles large meetings (10+ speakers) and podcasts/interviews (2–3 speakers) with CAM++ speaker diarization, `--num-speakers` hint, real name mapping, and speaker context for LLM identification
 - **Hotword biasing** — SeACo-Paraformer accepts participant names and domain terms to improve recognition accuracy (+50% on tested Chinese terms)
 - **Multi-language** — Chinese (SeACo-Paraformer, CER 1.95%), English (Paraformer-en), auto-detect (SenseVoiceSmall: zh/en/ja/ko/yue), or 99 languages (Whisper-large-v3-turbo)
-- **Long recordings** — Handles 4+ hour meetings without splitting (includes spectral clustering performance patch)
+- **Long recordings** — Handles 4+ hour recordings without splitting (includes spectral clustering performance patch)
 - **LLM cleanup** — Bedrock Claude removes fillers, fixes ASR errors, polishes grammar
-- **GPU & CPU** — Auto-detects CUDA; fully functional on CPU (slower)
+- **GPU & CPU** — Auto-detects CUDA; fully functional on CPU with [low-memory guidance](plugins/funasr-transcriber/skills/funasr-transcribe/references/pipeline-details.md#running-on-cpu-only--low-memory-machines)
 - **Resume support** — Checkpoint at every phase for interrupted runs
 
 ## Installation
@@ -17,7 +17,7 @@ Claude Code plugin for multi-speaker meeting transcription with automatic speake
 ### As Agent Skill (via [skills.sh](https://skills.sh))
 
 ```bash
-npx skills add zxkane/meeting-transcriber
+npx skills add zxkane/audio-transcriber-funasr
 ```
 
 ### As Claude Code Plugin
@@ -26,8 +26,8 @@ Add as a marketplace, then install:
 
 ```bash
 # In Claude Code
-/plugin marketplace add zxkane/meeting-transcriber
-/plugin install funasr-transcriber@zxkane-meeting-transcriber
+/plugin marketplace add zxkane/audio-transcriber-funasr
+/plugin install funasr-transcriber@zxkane-audio-transcriber-funasr
 ```
 
 ### Manual Usage
@@ -48,7 +48,12 @@ python3 plugins/funasr-transcriber/skills/funasr-transcribe/scripts/transcribe_f
 python3 plugins/funasr-transcriber/skills/funasr-transcribe/scripts/transcribe_funasr.py \
   meeting.flac --lang en --speakers "Alice,Bob,Carol,Dave"
 
-# 5. Auto-detect language (zh/en/ja/ko/yue)
+# 5. English podcast, 2 speakers
+python3 plugins/funasr-transcriber/skills/funasr-transcribe/scripts/transcribe_funasr.py \
+  episode.flac --lang en --num-speakers 2 --speakers "Host,Guest" \
+  --title "Podcast Transcript"
+
+# 6. Auto-detect language (zh/en/ja/ko/yue)
 python3 plugins/funasr-transcriber/skills/funasr-transcribe/scripts/transcribe_funasr.py \
   meeting.flac --lang auto --num-speakers 6
 ```

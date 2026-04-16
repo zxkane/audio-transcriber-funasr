@@ -71,7 +71,10 @@ Before starting transcription, **always ask the user** the following:
 If the user provides supporting materials:
 - Extract participant names and key terms → create `hotwords.txt`
 - Extract per-person context → create `speaker-context.json`
-- Use both with `--hotwords` and `--speaker-context` flags
+- Pass the original reference document (show notes, meeting agenda, attendee
+  list, etc.) directly with `--reference` — the LLM uses all proper nouns,
+  terms, and names from it to correct ASR errors
+- Use all three with `--hotwords`, `--speaker-context`, and `--reference`
 
 If no supporting files are available, proceed with `--num-speakers` only.
 
@@ -90,20 +93,26 @@ hang for hours during speaker clustering.
 
 ### 2. Audio Preprocessing
 
-Convert to 16kHz mono. Two options depending on priority:
+The script automatically converts input audio to 16kHz mono and validates
+that no audio is lost during conversion (detects silent truncation).
 
 ```bash
-# Smallest file (lossy, -3% sentences vs lossless — fine for most meetings)
-ffmpeg -i recording.m4a -ar 16000 -ac 1 -c:a libopus -b:a 32k meeting.opus
+# Automatic (default: FLAC, lossless, safest for long recordings)
+# Just pass the original file — the script handles conversion:
+python3 transcribe_funasr.py recording.m4a --audio-format flac
 
-# Lossless (larger, best quality)
+# Or manually convert beforehand:
 ffmpeg -i recording.m4a -ar 16000 -ac 1 -sample_fmt s16 meeting.flac
 ```
 
+**Important**: Use `--audio-format flac` (the default) for recordings over
+2 hours. Opus encoding can silently truncate long M4A files. The script
+will abort with a clear error if truncation is detected.
+
 | Format | 4h14m meeting | Quality | ASR impact |
 |--------|--------------|---------|-----------|
-| **Opus 32kbps** | **55MB** | Lossy | **-3% sentences, keywords intact** |
-| FLAC 16-bit | 219MB | Lossless | Baseline |
+| **FLAC 16-bit** | **219MB** | Lossless | **Baseline (recommended)** |
+| Opus 32kbps | 55MB | Lossy | -3% sentences, risk of truncation on long files |
 | WAV | 465MB | Lossless | Same as FLAC |
 | Original M4A | 173MB | Source | Also works directly |
 
@@ -146,11 +155,21 @@ python3 transcribe_funasr.py meeting.wav --lang auto --num-speakers 6
 # Whisper for any language
 python3 transcribe_funasr.py meeting.wav --lang whisper --num-speakers 4
 
-# Full pipeline with all supporting files
-python3 transcribe_funasr.py meeting.wav --lang zh --num-speakers 9 \
+# Full pipeline with all supporting files (best quality)
+python3 transcribe_funasr.py episode.m4a --lang zh --num-speakers 2 \
     --hotwords hotwords.txt \
-    --speakers "Alice,Bob,Carol" \
-    --speaker-context speaker-context.json
+    --speakers "孟岩,李继刚" \
+    --speaker-context speaker-context.json \
+    --reference show-notes.md    # any supporting text: agenda, attendee list, etc.
+
+# Use different LLM providers for cleanup (auto-detected from model ID)
+# Bedrock (ARN or cross-region ID)
+python3 transcribe_funasr.py meeting.wav \
+    --model arn:aws:bedrock:us-west-2:123456:application-inference-profile/abc
+# Anthropic Messages API
+python3 transcribe_funasr.py meeting.wav --model claude-sonnet-4-6
+# OpenAI-compatible API (also works with DeepSeek, vLLM, etc.)
+python3 transcribe_funasr.py meeting.wav --model gpt-4o
 
 # Raw transcription only (no LLM)
 python3 transcribe_funasr.py meeting.wav --skip-llm
@@ -174,14 +193,17 @@ FunASR's CAM++ may merge acoustically similar speakers. To improve:
 |------|---------|
 | `--lang` | `zh` (default), `zh-basic`, `en`, `auto`, `whisper` |
 | `--hotwords` | Hotword file or string — biases ASR toward terms (zh only) |
+| `--reference F` | Reference file (show notes, agenda, attendee list) — injected into LLM prompt for ASR correction |
 | `--num-speakers N` | Expected speaker count (improves diarization) |
 | `--speakers "A,B,C"` | Assign real names by first-appearance order |
 | `--speaker-context F` | JSON with per-speaker keywords for LLM |
+| `--audio-format` | Target conversion format: `flac` (default, lossless), `opus`, `wav` |
 | `--device cpu` | Force CPU mode |
 | `--batch-size N` | Adjust for memory (60 for CPU, 100 if GPU OOM) |
 | `--skip-transcribe` | Resume from saved `*_raw_transcript.json` |
 | `--skip-llm` | Skip LLM cleanup |
-| `--bedrock-model ID` | Override LLM model (default: `us.anthropic.claude-sonnet-4-6`) |
+| `--skip-preprocess` | Skip audio conversion (use input file as-is) |
+| `--model ID` | LLM model for cleanup (auto-detects Bedrock/Anthropic/OpenAI) |
 | `--title "..."` | Output document title (default: "Meeting Transcript") |
 | `--clean-cache` | Delete LLM chunk cache after completion |
 

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """FunASR: Multi-language meeting transcription with speaker diarization + LLM cleanup.
 
-Three-phase pipeline optimized for multi-speaker meetings:
+Four-phase pipeline optimized for multi-speaker meetings:
+  Phase 0: Audio preprocessing (ffmpeg conversion + duration validation)
   Phase 1: FunASR ASR + speaker diarization (+ optional hotword biasing)
-  Phase 2: Post-processing (merge consecutive utterances + speaker mapping)
-  Phase 3: LLM cleanup via Bedrock Claude (optional)
+  Phase 2: Post-processing (merge, speaker mapping, auto-verify via self-intro)
+  Phase 3: LLM cleanup via Bedrock/Anthropic/OpenAI (optional)
 
 Language presets:
   zh        — SeACo-Paraformer (best Chinese, CER 1.95%, hotword support)
@@ -49,10 +50,13 @@ Usage:
   python3 transcribe_funasr.py meeting.wav --speaker-context context.json
 """
 
+import argparse
 import json
+import re
+import shutil
+import subprocess
 import sys
 import time
-import argparse
 from pathlib import Path
 
 
@@ -107,6 +111,104 @@ MODEL_PRESETS = {
 }
 
 SUPPORTED_LANGS = list(MODEL_PRESETS.keys())
+
+
+# ──────────────────────────────────────────────
+# Audio preprocessing with duration validation
+# ──────────────────────────────────────────────
+
+def get_audio_duration(path: str) -> float:
+    """Get audio duration in seconds using ffprobe."""
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", path],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"ffprobe failed on {path}: {result.stderr.strip()}")
+    raw = result.stdout.strip()
+    try:
+        return float(raw)
+    except ValueError:
+        raise RuntimeError(
+            f"ffprobe returned non-numeric duration for {path}: {raw!r}. "
+            f"The file may be corrupt or missing duration metadata."
+        )
+
+
+def preprocess_audio(input_path: str, output_format: str = "flac") -> str:
+    """Convert audio to 16kHz mono for ASR. Validates output duration matches input.
+
+    Returns the path to the converted file (or the original if already suitable).
+    """
+    for tool in ("ffmpeg", "ffprobe"):
+        if not shutil.which(tool):
+            raise RuntimeError(
+                f"'{tool}' not found. Install ffmpeg: "
+                f"sudo apt-get install ffmpeg (or use --skip-preprocess)")
+    inp = Path(input_path)
+    # Skip conversion for formats FunASR reads natively at 16kHz
+    if inp.suffix.lower() in (".wav", ".flac") and _is_16k_mono(input_path):
+        print(f"  Audio already 16kHz mono: {input_path}")
+        return input_path
+
+    out_path = inp.with_suffix(f".{output_format}")
+    if out_path.exists():
+        # Validate pre-existing file is not corrupt from a previous failed run
+        try:
+            get_audio_duration(str(out_path))
+            print(f"  Converted file exists: {out_path}")
+        except RuntimeError:
+            print(f"  WARNING: Existing {out_path} appears corrupt, re-converting...")
+            out_path.unlink()
+    if not out_path.exists():
+        print(f"  Converting {inp.name} → {out_path.name} ...")
+        codec_args = {
+            "opus": ["-c:a", "libopus", "-b:a", "32k"],
+            "flac": ["-sample_fmt", "s16"],
+            "wav": [],
+        }.get(output_format, [])
+        cmd = ["ffmpeg", "-i", input_path, "-ar", "16000", "-ac", "1",
+               *codec_args, str(out_path), "-y"]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(f"ffmpeg conversion failed: {result.stderr[-500:]}")
+
+    # Duration validation — catch silent truncation
+    in_dur = get_audio_duration(input_path)
+    out_dur = get_audio_duration(str(out_path))
+    diff = abs(in_dur - out_dur)
+    print(f"  Input duration: {in_dur:.1f}s, output duration: {out_dur:.1f}s (diff: {diff:.1f}s)")
+    if diff > 5.0:
+        raise RuntimeError(
+            f"Audio truncation detected! Input: {in_dur:.1f}s, output: {out_dur:.1f}s "
+            f"(lost {diff:.1f}s). Aborting to prevent incomplete transcription. "
+            f"Try converting to FLAC instead: ffmpeg -i {input_path} -ar 16000 -ac 1 "
+            f"-sample_fmt s16 {inp.with_suffix('.flac')}"
+        )
+    return str(out_path)
+
+
+def _is_16k_mono(path: str) -> bool:
+    """Check if audio is already 16kHz mono."""
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries",
+             "stream=sample_rate,channels", "-of", "json", path],
+            capture_output=True, text=True,
+        )
+    except FileNotFoundError:
+        return False  # ffprobe not installed; preprocess_audio will catch this
+    if result.returncode != 0:
+        return False
+    try:
+        info = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return False
+    streams = info.get("streams", [])
+    if not streams:
+        return False
+    return streams[0].get("sample_rate") == "16000" and streams[0].get("channels") == 1
 
 
 # ──────────────────────────────────────────────
@@ -232,8 +334,88 @@ def build_speaker_map(transcript: list, speakers: list = None) -> dict:
     return {spk_id: f"Speaker {spk_id + 1}" for spk_id in seen_ids}
 
 
+def verify_speaker_assignment(transcript: list, speaker_map: dict,
+                              speaker_names: list = None) -> dict:
+    """Auto-verify speaker assignment by detecting self-introductions.
+
+    Scans the first 5 minutes of transcript. If a speaker says their own name
+    (e.g., "我是李继刚" / "I'm Alice") but is currently labeled as someone else,
+    swap all speaker assignments globally.
+
+    Returns the (possibly corrected) speaker_map.
+    """
+    if not transcript or not speaker_names or len(speaker_names) < 2:
+        return speaker_map
+
+    # Collect segments from first 5 minutes
+    cutoff_ms = transcript[0]["start_ms"] + 5 * 60 * 1000
+    early_segments = [s for s in transcript if s["start_ms"] <= cutoff_ms]
+
+    # Patterns: "我是X", "我叫X", "I'm X", "I am X", "this is X", "my name is X"
+    intro_patterns = [
+        r"我是\s*{name}", r"我叫\s*{name}", r"I'?\s*m\s+{name}",
+        r"I\s+am\s+{name}", r"my\s+name\s+is\s+{name}",
+        r"this\s+is\s+{name}", r"大家好.*{name}",
+    ]
+
+    # Check each early segment for self-introductions
+    mismatches = []
+    confirmations = []
+    for seg in early_segments:
+        current_label = speaker_map.get(seg["speaker"], "")
+        text = seg["text"]
+        for name in speaker_names:
+            for pat_template in intro_patterns:
+                pat = pat_template.format(name=re.escape(name))
+                if re.search(pat, text, re.IGNORECASE):
+                    entry = {
+                        "speaker_id": seg["speaker"],
+                        "current_label": current_label,
+                        "actual_name": name,
+                        "evidence": text[:100],
+                        "time_ms": seg["start_ms"],
+                    }
+                    if name == current_label:
+                        confirmations.append(entry)
+                    else:
+                        mismatches.append(entry)
+
+    if not mismatches:
+        if confirmations:
+            c = confirmations[0]
+            print(f"  Speaker verification: CONFIRMED at [{format_time_ms(c['time_ms'])}], "
+                  f"'{c['current_label']}' correctly says their own name.")
+        else:
+            print("  WARNING: Could not auto-verify speaker assignment. "
+                  "Manual review recommended.")
+        return speaker_map
+
+    # If we found a mismatch, swap the two speaker IDs globally
+    m = mismatches[0]
+    print(f"  Speaker verification: at [{format_time_ms(m['time_ms'])}], "
+          f"speaker labeled '{m['current_label']}' said a self-introduction "
+          f"matching '{m['actual_name']}'. Swapping labels.")
+
+    # Find the two speaker IDs to swap
+    id_a = m["speaker_id"]  # Currently mislabeled
+    id_b = None
+    for spk_id, label in speaker_map.items():
+        if label == m["actual_name"]:
+            id_b = spk_id
+            break
+
+    if id_b is not None and id_a != id_b:
+        speaker_map[id_a], speaker_map[id_b] = speaker_map[id_b], speaker_map[id_a]
+        print(f"  Swapped: SPEAKER_{id_a} ↔ SPEAKER_{id_b}")
+    else:
+        speaker_map[id_a] = m["actual_name"]
+        print(f"  Relabeled: SPEAKER_{id_a} → {m['actual_name']}")
+
+    return speaker_map
+
+
 # ──────────────────────────────────────────────
-# Phase 3: LLM cleanup (Bedrock Claude)
+# Phase 3: LLM cleanup (multi-provider)
 # ──────────────────────────────────────────────
 
 def format_time_ms(ms: int) -> str:
@@ -277,53 +459,191 @@ Rules:
 8. Output cleaned text only, format: [timestamp] Name: content"""
 
 
-def cleanup_with_bedrock(chunk_text: str, chunk_idx: int, total: int,
-                         system_prompt: str, model_id: str, region: str):
-    """Call Bedrock Claude to clean one chunk."""
-    import boto3
-    from botocore.config import Config
-    from botocore.exceptions import ClientError
+# ──────────────────────────────────────────────
+# Multi-provider LLM support
+# ──────────────────────────────────────────────
+
+def _detect_llm_provider(model_id: str) -> str:
+    """Detect LLM provider from model ID string.
+
+    Returns one of: 'bedrock', 'anthropic', 'openai'.
+    """
+    # Bedrock: ARN or cross-region model ID (two-letter region prefix + dot)
+    if model_id.startswith("arn:aws:bedrock:") or re.match(r"^[a-z]{2}\.", model_id):
+        return "bedrock"
+    if "claude" in model_id and not model_id.startswith("arn:"):
+        return "anthropic"
+    # Default to openai-compatible for everything else (gpt-*, deepseek-*, etc.)
+    return "openai"
+
+
+def _call_bedrock(system_prompt: str, user_message: str,
+                  model_id: str, region: str, max_tokens: int = 8192) -> str:
+    """Call AWS Bedrock converse API. Supports inference profile ARNs."""
+    try:
+        import boto3
+        from botocore.config import Config
+    except ImportError:
+        raise RuntimeError(
+            "The 'boto3' package is required for Bedrock API calls. "
+            "Install it with: pip install boto3")
 
     client = boto3.client(
         "bedrock-runtime", region_name=region,
         config=Config(read_timeout=300, connect_timeout=10, retries={"max_attempts": 3}),
     )
-    body = json.dumps({
-        "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 8192,
-        "system": system_prompt,
-        "messages": [{"role": "user",
-                       "content": f"Clean the following meeting transcript segment "
-                                  f"({chunk_idx+1}/{total}):\n\n{chunk_text}"}],
-    })
-    for attempt in range(3):
+    response = client.converse(
+        modelId=model_id,
+        system=[{"text": system_prompt}],
+        messages=[{"role": "user", "content": [{"text": user_message}]}],
+        inferenceConfig={"maxTokens": max_tokens},
+    )
+    try:
+        return response["output"]["message"]["content"][0]["text"]
+    except (KeyError, IndexError) as e:
+        raise RuntimeError(
+            f"Unexpected Bedrock response structure: {e}. "
+            f"Response keys: {list(response.keys())}"
+        ) from e
+
+
+def _call_anthropic(system_prompt: str, user_message: str,
+                    model_id: str, max_tokens: int = 8192) -> str:
+    """Call Anthropic Messages API via the anthropic SDK."""
+    try:
+        from anthropic import Anthropic
+    except ImportError:
+        raise RuntimeError(
+            "The 'anthropic' package is required for Anthropic API calls. "
+            "Install it with: pip install anthropic")
+
+    client = Anthropic()  # Uses ANTHROPIC_API_KEY env var
+    response = client.messages.create(
+        model=model_id,
+        max_tokens=max_tokens,
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_message}],
+    )
+    if not response.content:
+        raise RuntimeError(
+            f"Anthropic API returned empty content (stop_reason={response.stop_reason})")
+    return response.content[0].text
+
+
+def _call_openai(system_prompt: str, user_message: str,
+                 model_id: str, max_tokens: int = 8192) -> str:
+    """Call OpenAI-compatible API via the openai SDK.
+
+    Works with OpenAI, DeepSeek, vLLM, Ollama, etc.
+    Set OPENAI_BASE_URL for non-OpenAI endpoints.
+    """
+    try:
+        from openai import OpenAI
+    except ImportError:
+        raise RuntimeError(
+            "The 'openai' package is required for OpenAI-compatible API calls. "
+            "Install it with: pip install openai")
+
+    client = OpenAI()  # Uses OPENAI_API_KEY and optionally OPENAI_BASE_URL
+    response = client.chat.completions.create(
+        model=model_id,
+        max_tokens=max_tokens,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message},
+        ],
+    )
+    if not response.choices or response.choices[0].message.content is None:
+        raise RuntimeError(f"OpenAI API returned empty content for model {model_id}")
+    return response.choices[0].message.content
+
+
+def _is_retryable(e: Exception) -> bool:
+    """Check if an LLM exception is retryable (rate limit / throttling)."""
+    msg = str(e).lower()
+    return any(token in msg for token in ("throttl", "rate_limit", "ratelimit", "429", "529"))
+
+
+def call_llm(system_prompt: str, user_message: str,
+             model_id: str, region: str = None, max_retries: int = 3) -> str:
+    """Call LLM with auto-detected provider and retry logic."""
+    provider = _detect_llm_provider(model_id)
+    for attempt in range(max_retries):
         try:
-            resp = client.invoke_model(modelId=model_id, contentType="application/json",
-                                       accept="application/json", body=body)
-            return json.loads(resp["body"].read())["content"][0]["text"]
-        except ClientError as e:
-            if "ThrottlingException" in str(e) and attempt < 2:
-                time.sleep(5 * (attempt + 1))
+            if provider == "bedrock":
+                return _call_bedrock(system_prompt, user_message,
+                                     model_id, region or "us-west-2")
+            elif provider == "anthropic":
+                return _call_anthropic(system_prompt, user_message, model_id)
+            else:
+                return _call_openai(system_prompt, user_message, model_id)
+        except Exception as e:
+            if attempt < max_retries - 1 and _is_retryable(e):
+                wait = 5 * (attempt + 1)
+                print(f"  LLM call attempt {attempt+1} failed ({type(e).__name__}), "
+                      f"retrying in {wait}s...")
+                time.sleep(wait)
             else:
                 raise
+    raise RuntimeError("call_llm: all retries exhausted")  # unreachable, satisfies type checker
+
+
+# ──────────────────────────────────────────────
+# LLM cleanup with reference context
+# ──────────────────────────────────────────────
+
+def build_system_prompt(speaker_context: dict = None,
+                        reference_text: str = None,
+                        speaker_names: list = None) -> str:
+    """Build the LLM system prompt, enriched with all available context."""
+    prompt = DEFAULT_SYSTEM_PROMPT
+
+    # Inject canonical speaker names and common ASR error corrections
+    if speaker_names:
+        prompt += f"\n\nThe speakers in this recording are: {', '.join(speaker_names)}."
+        prompt += ("\nCorrect all ASR misrecognitions of these names. "
+                   "If a speaker says their own name in the content, treat that as ground truth. "
+                   "Common ASR errors for Chinese names include phonetically similar characters "
+                   "(e.g., 纪刚→李继刚, 其刚→李继刚, 李其刚→李继刚, 莫言→孟岩, 纪纲→李继刚).")
+
+    # Inject speaker context (roles, background)
+    if speaker_context:
+        prompt += "\n\nSpeaker context (use to fix ASR errors and identify speakers):\n"
+        for name, info in speaker_context.items():
+            prompt += f"- {name}: {info}\n"
+
+    # Inject show notes / reference material — this gives the LLM a rich vocabulary
+    # of correct proper nouns, terms, topics, and names to draw from
+    if reference_text:
+        # Truncate to ~4000 chars to stay within prompt budget
+        notes_text = reference_text[:4000]
+        if len(reference_text) > 4000:
+            notes_text += "\n[...truncated]"
+        prompt += (
+            "\n\nReference material (show notes / meeting agenda). "
+            "Use this to correct ASR errors — proper nouns, person names, "
+            "organization names, technical terms, and topic keywords in this "
+            "document are authoritative spellings:\n\n"
+            + notes_text
+        )
+
+    return prompt
 
 
 def run_llm_cleanup(merged: list, speaker_map: dict, model_id: str, region: str,
-                    speaker_context: dict = None, cache_dir: Path = None) -> list:
+                    speaker_context: dict = None, cache_dir: Path = None,
+                    reference_text: str = None, speaker_names: list = None) -> list:
     """Chunk merged transcript and clean each via LLM. Supports resume via cache_dir."""
-    system_prompt = DEFAULT_SYSTEM_PROMPT
-    if speaker_context:
-        extra = "\n\nMeeting participant context (use to fix ASR errors and identify speakers):\n"
-        for name, info in speaker_context.items():
-            extra += f"- {name}: {info}\n"
-        system_prompt += extra
+    system_prompt = build_system_prompt(speaker_context, reference_text, speaker_names)
 
     chunks = chunk_by_duration(merged)
     cleaned = []
+    failed_chunks = []
     if cache_dir:
         cache_dir.mkdir(exist_ok=True)
 
-    print(f"  LLM cleanup: {len(chunks)} chunks, model: {model_id}")
+    provider = _detect_llm_provider(model_id)
+    print(f"  LLM cleanup: {len(chunks)} chunks, model: {model_id} (provider: {provider})")
     for i, chunk in enumerate(chunks):
         cache_file = cache_dir / f"chunk_{i:03d}.txt" if cache_dir else None
 
@@ -333,18 +653,28 @@ def run_llm_cleanup(merged: list, speaker_map: dict, model_id: str, region: str,
             continue
 
         chunk_text = format_chunk(chunk, speaker_map)
+        user_msg = (f"Clean the following meeting transcript segment "
+                    f"({i+1}/{len(chunks)}):\n\n{chunk_text}")
         try:
-            result = cleanup_with_bedrock(chunk_text, i, len(chunks),
-                                          system_prompt, model_id, region)
+            result = call_llm(system_prompt, user_msg, model_id, region)
             cleaned.append(result)
             if cache_file:
                 cache_file.write_text(result, encoding="utf-8")
         except Exception as e:
-            print(f"  chunk {i+1} cleanup failed: {e}, using raw text")
+            print(f"  ERROR: chunk {i+1} cleanup failed: {type(e).__name__}: {e}")
+            print(f"         Falling back to raw text for this chunk.")
             cleaned.append(chunk_text)
+            failed_chunks.append(i + 1)
 
         print(f"  chunk {i+1}/{len(chunks)} done")
         time.sleep(1)
+
+    if failed_chunks:
+        pct = len(failed_chunks) / len(chunks) * 100
+        print(f"\n  WARNING: {len(failed_chunks)}/{len(chunks)} chunks ({pct:.0f}%) "
+              f"used raw text due to LLM failures: chunks {failed_chunks}")
+        print(f"  The output contains uncleaned segments. "
+              f"Delete the cached chunks and re-run to retry.")
 
     return cleaned
 
@@ -395,7 +725,8 @@ def resolve_hotwords(hotwords_arg: str) -> str:
     Otherwise treat as space-separated hotword string.
     """
     if hotwords_arg and hotwords_arg.endswith(".txt") and Path(hotwords_arg).exists():
-        count = sum(1 for line in open(hotwords_arg) if line.strip())
+        with open(hotwords_arg) as f:
+            count = sum(1 for line in f if line.strip())
         print(f"  Hotwords file: {hotwords_arg} ({count} words)")
         return hotwords_arg
     return hotwords_arg
@@ -423,15 +754,28 @@ def main():
                    help="Hotwords to bias ASR (space-separated string or .txt file). "
                         "Use for participant names, technical terms, project names. "
                         "Only effective with --lang zh (SeACo-Paraformer)")
+    p.add_argument("--reference", type=str, default=None,
+                   help="Reference text file (show notes, meeting agenda, attendee list, "
+                        "etc.) with authoritative names, terms, and topics. "
+                        "Injected into LLM prompt to correct ASR errors.")
     p.add_argument("--device", default=None,
                    help="Device: cuda:0 / cpu (auto-detected by default)")
     p.add_argument("--batch-size", type=int, default=300,
                    help="Batch size in seconds. Use 60 for CPU, 100 if GPU OOM (default: 300)")
+    p.add_argument("--audio-format", default="flac", choices=["opus", "flac", "wav"],
+                   help="Target format for audio preprocessing (default: flac). "
+                        "flac is lossless and avoids truncation issues with opus on long audio.")
     p.add_argument("--output", default=None,
                    help="Output file (default: <stem>-transcript.md)")
-    p.add_argument("--bedrock-model", default="us.anthropic.claude-sonnet-4-6",
-                   help="Bedrock model ID for LLM cleanup")
-    p.add_argument("--bedrock-region", default="us-west-2", help="Bedrock region")
+    _default_model = "us.anthropic.claude-sonnet-4-6"
+    p.add_argument("--model", default=None,
+                   help=f"LLM model ID for cleanup (default: {_default_model}). "
+                        "Auto-detects provider: "
+                        "Bedrock ARN/cross-region ID → Bedrock converse API, "
+                        "claude-* → Anthropic Messages API, "
+                        "gpt-*/deepseek-*/other → OpenAI-compatible API")
+    p.add_argument("--bedrock-region", default="us-west-2",
+                   help="AWS region for Bedrock (only used when provider is bedrock)")
     p.add_argument("--speaker-context", type=str, default=None,
                    help="JSON file with per-speaker context to help LLM identify speakers")
     p.add_argument("--title", type=str, default="Meeting Transcript",
@@ -439,9 +783,17 @@ def main():
     p.add_argument("--skip-transcribe", action="store_true",
                    help="Skip ASR, load from *_raw_transcript.json")
     p.add_argument("--skip-llm", action="store_true", help="Skip LLM cleanup")
+    p.add_argument("--skip-preprocess", action="store_true",
+                   help="Skip audio preprocessing (use input file as-is)")
     p.add_argument("--clean-cache", action="store_true",
                    help="Delete LLM chunk cache after completion")
+    # Backwards compatibility
+    p.add_argument("--bedrock-model", type=str, default=None,
+                   help=argparse.SUPPRESS)  # Deprecated, use --model
     args = p.parse_args()
+    # Resolve model: --model wins, then --bedrock-model, then default
+    if args.model is None:
+        args.model = args.bedrock_model or _default_model
 
     audio_path = Path(args.audio_file)
     raw_json = Path(f"{audio_path.stem}_raw_transcript.json")
@@ -471,6 +823,24 @@ def main():
               f"(only supported with --lang zh / SeACo-Paraformer)")
         hotwords = None
 
+    # Load reference materials
+    reference_text = None
+    if args.reference:
+        ref_path = Path(args.reference)
+        if ref_path.exists():
+            reference_text = ref_path.read_text(encoding="utf-8")
+            print(f"  Reference loaded: {ref_path} ({len(reference_text)} chars)")
+        else:
+            print(f"  Warning: --reference file not found: {args.reference}")
+
+    # ── Phase 0: Audio preprocessing ──
+    asr_audio = str(audio_path)
+    if not args.skip_transcribe and not args.skip_preprocess:
+        if audio_path.exists():
+            print("[Phase 0] Audio preprocessing...")
+            asr_audio = preprocess_audio(str(audio_path), args.audio_format)
+        # else: will be caught below
+
     # ── Phase 1: Transcribe ──
     if args.skip_transcribe:
         if not raw_json.exists():
@@ -483,7 +853,7 @@ def main():
         if not audio_path.exists():
             print(f"Error: {audio_path} not found")
             sys.exit(1)
-        transcript = transcribe_with_funasr(str(audio_path), args.lang, num_speakers,
+        transcript = transcribe_with_funasr(asr_audio, args.lang, num_speakers,
                                             args.device, args.batch_size, hotwords)
         with open(raw_json, "w", encoding="utf-8") as f:
             json.dump(transcript, f, ensure_ascii=False, indent=2)
@@ -496,6 +866,8 @@ def main():
     # ── Phase 2: Post-process ──
     merged = merge_consecutive(transcript)
     speaker_map = build_speaker_map(transcript, speaker_names)
+    # Auto-verify speaker assignment via self-introductions
+    speaker_map = verify_speaker_assignment(transcript, speaker_map, speaker_names)
     print(f"[Phase 2] Merged: {len(transcript)} sentences -> {len(merged)} segments")
 
     # ── Phase 3: LLM cleanup ──
@@ -510,8 +882,9 @@ def main():
     else:
         cache_dir = Path(f"{audio_path.stem}_llm_cache")
         print("[Phase 3] LLM cleanup...")
-        cleaned_parts = run_llm_cleanup(merged, speaker_map, args.bedrock_model,
-                                        args.bedrock_region, speaker_context, cache_dir)
+        cleaned_parts = run_llm_cleanup(merged, speaker_map, args.model,
+                                        args.bedrock_region, speaker_context,
+                                        cache_dir, reference_text, speaker_names)
         if args.clean_cache and cache_dir.exists():
             for f in cache_dir.glob("chunk_*.txt"):
                 f.unlink()

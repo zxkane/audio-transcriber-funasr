@@ -6,19 +6,25 @@ using FunASR with speaker diarization and LLM cleanup.
 ## Project Structure
 
 - `plugins/funasr-transcriber/` — The plugin source code
-- `.claude-plugin/marketplace.json` — skills.sh marketplace registration
+- `.agents/skills/` — Autonomous dev team skills (installed via skills.sh)
 - `.claude/skills/` — Symlinks for Claude Code skill discovery
+- `.claude-plugin/marketplace.json` — skills.sh marketplace registration
 - `output/` — Generated transcription outputs (gitignored)
 
-## Development
+## Development Workflow
 
+- Use `/autonomous-dev` skill for code changes (TDD, worktree isolation, CI verification)
+- Use `/autonomous-review` skill for PR code review before merging
+- Use `/create-issue` skill for structured GitHub issue creation
+- Use `document-skills:skill-creator` skill to verify/review SKILL.md changes
 - All skill source lives under `plugins/funasr-transcriber/skills/funasr-transcribe/`
 - Scripts are in `scripts/`, references in `references/`
 - The main entry point is `SKILL.md`
-- Test changes by running transcription on sample audio
+- Run tests: `cd plugins/funasr-transcriber/skills/funasr-transcribe/scripts && python3 -m pytest test_speaker_verification.py -v`
 
 ## Conventions
 
 - English for code, comments, commit messages, and documentation
 - Chinese audio content is the primary use case but the pipeline is language-agnostic
-- Keep SKILL.md lean (<2000 words); move details to references/
+- Keep SKILL.md lean (<500 lines); move details to references/
+- Scripts run directly from plugin directory via `$SCRIPTS` — never copy to CWD

@@ -271,6 +271,24 @@ The pipeline supports resuming interrupted runs:
 - **Phase 3 cache**: `<stem>_llm_cache/chunk_NNN.txt` — already-cleaned chunks are reused
   (kept by default; add `--clean-cache` to delete after completion)
 
+## Model Caching
+
+FunASR models (~3 GB for the `zh` preset) are downloaded from ModelScope on first run
+and cached in `~/.cache/modelscope/hub/`. On ephemeral instances (EC2, cloud VMs), the
+cache is lost when the instance is replaced, requiring a ~2 minute re-download.
+
+To persist the cache on durable storage (e.g., an EBS data volume):
+
+```bash
+# Via CLI flag (recommended)
+python3 transcribe_funasr.py meeting.flac --model-cache-dir /data/modelscope-cache ...
+
+# Via environment variable
+MODELSCOPE_CACHE=/data/modelscope-cache python3 transcribe_funasr.py meeting.flac ...
+```
+
+The `systemd-run` examples below include `-E MODELSCOPE_CACHE=...` for this reason.
+
 ## Speaker Context JSON Format
 
 The `--speaker-context` file helps the LLM identify speakers and fix ASR errors:
@@ -306,20 +324,28 @@ Option A: `systemd-run` (preferred on systemd hosts):
 
 ```bash
 systemd-run --user --unit=transcribe-job \
-  --working-directory=$(pwd) \
-  bash -c 'source .venv/bin/activate && python3 transcribe_funasr.py meeting.flac \
-    --lang zh --num-speakers 9 --skip-llm > transcribe.log 2>&1'
+  --working-directory=/tmp \
+  -E MODELSCOPE_CACHE=/data/modelscope-cache \
+  bash -c 'source /path/to/.venv/bin/activate && \
+    python3 /path/to/transcribe_funasr.py /tmp/meeting.flac \
+    --lang zh --num-speakers 9 --skip-llm > /tmp/transcribe.log 2>&1'
 
 # Monitor progress
 systemctl --user status transcribe-job.service
-tail -f transcribe.log
+tail -f /tmp/transcribe.log
 
 # Check result
-ls -lh *-transcript.md *_raw_transcript.json
+ls -lh /tmp/*-transcript.md /tmp/*_raw_transcript.json
 ```
 
 `systemd-run` creates a transient systemd service fully independent of the agent
 session — it survives session resets, context pruning, and exec timeouts.
+
+> **Warning:** `systemd-run` creates an isolated mount namespace. FUSE mounts
+> (rclone, sshfs, Google Drive, etc.) from the parent session are NOT visible
+> to the transient service. Copy all dependency files (audio, hotwords,
+> speaker-context, reference documents) to a local path (e.g., `/tmp`) before
+> launching. Always use `--working-directory=/tmp` or another real filesystem path.
 
 > **Note:** `systemd-run --user` requires a user-level systemd instance. It may not
 > work in Docker containers or cloud VMs without `loginctl enable-linger`.
@@ -424,9 +450,12 @@ python3 transcribe_funasr.py episode.flac --lang whisper --num-speakers 2 \
 1. **Always provide `--num-speakers`** — podcasts have a known, fixed speaker count;
    this dramatically improves diarization accuracy with only 2–3 voices
 2. **Always provide `--speakers`** — host/guest names are known upfront
-3. **`--lang auto`** works well for bilingual shows — SenseVoiceSmall handles
-   intra-utterance language switching (zh/en/ja/ko/yue)
-4. **`--lang whisper`** for any other language or heavy code-switching
+3. **`--lang auto`** works for bilingual transcript-only output (no speaker labels) —
+   SenseVoiceSmall handles intra-utterance language switching (zh/en/ja/ko/yue) but
+   does not output timestamps, so **speaker diarization is not supported**.
+   Use `--lang zh` for Chinese podcasts that need speaker identification.
+4. **`--lang whisper`** for any other language or heavy code-switching (also lacks
+   timestamp support for diarization — transcript-only)
 5. **Hotwords** — for Chinese podcasts, include the show name and guest's full name;
    for English podcasts, hotwords are usually unnecessary
 6. **`--speaker-context`** — describe the host/guest dynamic:
@@ -438,3 +467,7 @@ python3 transcribe_funasr.py episode.flac --lang whisper --num-speakers 2 \
    ```
 7. **Audio quality** — podcasts are typically studio-recorded with better SNR than
    meetings; diarization accuracy is correspondingly higher
+8. **Audio source matters** — mobile app downloads may be truncated (trial/preview
+   versions). Download from the web interface for complete files. The script's
+   Phase 0 duration validation catches conversion truncation but cannot detect
+   a source file that is already incomplete.

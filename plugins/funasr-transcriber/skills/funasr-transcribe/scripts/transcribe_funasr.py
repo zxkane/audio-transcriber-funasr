@@ -28,11 +28,11 @@ Usage:
   # English meeting
   python3 transcribe_funasr.py meeting.wav --lang en --num-speakers 4
 
-  # Auto-detect language
-  python3 transcribe_funasr.py meeting.wav --lang auto --num-speakers 6
+  # Auto-detect language (no speaker diarization — use zh/en for that)
+  python3 transcribe_funasr.py meeting.wav --lang auto
 
-  # Whisper for any language
-  python3 transcribe_funasr.py meeting.wav --lang whisper --num-speakers 4
+  # Whisper for any language (no speaker diarization — use zh/en for that)
+  python3 transcribe_funasr.py meeting.wav --lang whisper
 
   # With real speaker names
   python3 transcribe_funasr.py meeting.wav --speakers "Alice,Bob,Carol"
@@ -52,6 +52,7 @@ Usage:
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -114,6 +115,14 @@ MODEL_PRESETS = {
 }
 
 SUPPORTED_LANGS = list(MODEL_PRESETS.keys())
+
+
+def validate_lang_diarization(lang: str, num_speakers: Optional[int]) -> None:
+    """Fail fast if language preset is incompatible with speaker diarization."""
+    if lang in ("auto", "whisper") and num_speakers:
+        print(f"ERROR: --lang {lang} does not support speaker diarization "
+              f"(no per-sentence timestamps). Use --lang zh or --lang en instead.")
+        sys.exit(1)
 
 
 # ──────────────────────────────────────────────
@@ -806,6 +815,9 @@ def main():
                    help="Skip audio preprocessing (use input file as-is)")
     p.add_argument("--clean-cache", action="store_true",
                    help="Delete LLM chunk cache after completion")
+    p.add_argument("--model-cache-dir", type=str, default=None,
+                   help="Directory for ModelScope model cache (~3GB). "
+                        "Sets MODELSCOPE_CACHE env var. Default: ~/.cache/modelscope/")
     # Backwards compatibility
     p.add_argument("--bedrock-model", type=str, default=None,
                    help=argparse.SUPPRESS)  # Deprecated, use --model
@@ -813,6 +825,11 @@ def main():
     # Resolve model: --model wins, then --bedrock-model, then default
     if args.model is None:
         args.model = args.bedrock_model or _default_model
+
+    # Set model cache dir before any FunASR import
+    if args.model_cache_dir:
+        os.environ["MODELSCOPE_CACHE"] = args.model_cache_dir
+        print(f"  Model cache: {args.model_cache_dir}")
 
     audio_path = Path(args.audio_file)
     raw_json = Path(f"{audio_path.stem}_raw_transcript.json")
@@ -833,6 +850,9 @@ def main():
     # Parse speaker names
     speaker_names = [s.strip() for s in args.speakers.split(",")] if args.speakers else None
     num_speakers = args.num_speakers or (len(speaker_names) if speaker_names else None)
+
+    # Validate language preset supports diarization when speakers are requested
+    validate_lang_diarization(args.lang, num_speakers)
 
     # Resolve hotwords
     hotwords = resolve_hotwords(args.hotwords) if args.hotwords else None
@@ -881,6 +901,13 @@ def main():
     if not transcript:
         print("Error: empty transcript")
         sys.exit(1)
+
+    # Runtime check: warn if most segments lack timestamps (diarization degraded)
+    no_ts = sum(1 for s in transcript if s["start_ms"] == 0 and s["end_ms"] == 0)
+    if no_ts > len(transcript) * 0.5:
+        print(f"\n  WARNING: {no_ts}/{len(transcript)} segments lack timestamps. "
+              f"Speaker diarization will be degraded. "
+              f"Use --lang zh or --lang en for better results.")
 
     # ── Phase 2: Post-process ──
     merged = merge_consecutive(transcript)

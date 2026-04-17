@@ -98,9 +98,12 @@ def _call_openai(system_prompt: str, user_message: str,
 
 
 def is_retryable(e: Exception) -> bool:
-    """Check if an LLM exception is retryable (rate limit / throttling)."""
+    """Check if an LLM exception is retryable (rate limit / throttling / timeout)."""
     msg = str(e).lower()
-    return any(token in msg for token in ("throttl", "rate_limit", "ratelimit", "429", "529"))
+    return any(token in msg for token in (
+        "throttl", "rate_limit", "ratelimit", "429", "529",
+        "read timeout", "readtimeout", "timed out", "connect timeout",
+    ))
 
 
 def call_llm(system_prompt: str, user_message: str,

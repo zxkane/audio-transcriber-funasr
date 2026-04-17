@@ -5,6 +5,7 @@ Covers: llm_utils, verify_speakers, and speaker-related functions
 in transcribe_funasr. All LLM calls are mocked.
 """
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -15,6 +16,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent))
 
 from llm_utils import detect_llm_provider, is_retryable, call_llm
+import transcribe_funasr as tf
 import verify_speakers as vs
 
 
@@ -117,6 +119,15 @@ class TestIsRetryable:
 
     def test_not_retryable_generic(self):
         assert not is_retryable(Exception("something went wrong"))
+
+    def test_read_timeout_retryable(self):
+        assert is_retryable(Exception("Read timeout on endpoint URL: https://bedrock..."))
+
+    def test_connect_timeout_retryable(self):
+        assert is_retryable(Exception("Connect timeout on endpoint URL"))
+
+    def test_timed_out_retryable(self):
+        assert is_retryable(Exception("Request timed out after 300s"))
 
 
 # ──────────────────────────────────────────────
@@ -397,8 +408,6 @@ class TestVerifyMeeting:
 # transcribe_funasr: speaker verification functions
 # ──────────────────────────────────────────────
 
-import transcribe_funasr as tf
-
 
 class TestTranscribeMergeConsecutive:
     def test_merges_same_speaker(self):
@@ -540,6 +549,54 @@ class TestBuildSystemPrompt:
         long_ref = "x" * 5000
         prompt = tf.build_system_prompt(reference_text=long_ref)
         assert "[...truncated]" in prompt
+
+
+# ──────────────────────────────────────────────
+# transcribe_funasr: validate_lang_diarization
+# ──────────────────────────────────────────────
+
+class TestValidateLangDiarization:
+    def test_auto_with_speakers_exits(self):
+        with pytest.raises(SystemExit) as exc_info:
+            tf.validate_lang_diarization("auto", 2)
+        assert exc_info.value.code == 1
+
+    def test_whisper_with_speakers_exits(self):
+        with pytest.raises(SystemExit) as exc_info:
+            tf.validate_lang_diarization("whisper", 3)
+        assert exc_info.value.code == 1
+
+    def test_zh_with_speakers_ok(self):
+        tf.validate_lang_diarization("zh", 2)
+
+    def test_auto_without_speakers_ok(self):
+        tf.validate_lang_diarization("auto", None)
+
+    def test_zh_basic_with_speakers_ok(self):
+        tf.validate_lang_diarization("zh-basic", 5)
+
+    def test_en_with_speakers_ok(self):
+        tf.validate_lang_diarization("en", 4)
+
+
+# ──────────────────────────────────────────────
+# transcribe_funasr: --model-cache-dir
+# ──────────────────────────────────────────────
+
+class TestModelCacheDir:
+    def test_argparse_accepts_model_cache_dir(self):
+        parser = argparse.ArgumentParser()
+        parser.add_argument("audio_file")
+        parser.add_argument("--model-cache-dir", type=str, default=None)
+        args = parser.parse_args(["test.wav", "--model-cache-dir", "/tmp/models"])
+        assert args.model_cache_dir == "/tmp/models"
+
+    def test_argparse_default_is_none(self):
+        parser = argparse.ArgumentParser()
+        parser.add_argument("audio_file")
+        parser.add_argument("--model-cache-dir", type=str, default=None)
+        args = parser.parse_args(["test.wav"])
+        assert args.model_cache_dir is None
 
 
 # ──────────────────────────────────────────────

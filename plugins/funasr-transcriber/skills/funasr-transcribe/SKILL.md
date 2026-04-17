@@ -45,6 +45,10 @@ SCRIPTS=${CLAUDE_PLUGIN_ROOT}/skills/funasr-transcribe/scripts
 
 All presets include **speaker diarization** (CAM++) and **VAD** (FSMN).
 
+> **Diarization caveat:** `auto` and `whisper` do not output per-sentence timestamps,
+> so speaker diarization does not work with these presets. Use `zh`, `zh-basic`, or
+> `en` when speaker identification is needed (e.g., podcasts, meetings).
+
 ## Workflow
 
 Before starting transcription, **always ask the user**:
@@ -62,8 +66,9 @@ Before starting transcription, **always ask the user**:
 
 **Adapt defaults by recording type:**
 - **Meeting**: default `--lang zh`, ask about supporting files
-- **Podcast / interview**: default `--num-speakers 2`, always ask for
+- **Podcast / interview**: default `--lang zh`, `--num-speakers 2`, always ask for
   host + guest names, suggest `--speaker-context` for roles
+  (do NOT use `--lang auto` — it lacks timestamps for speaker diarization)
 
 If the user provides supporting materials:
 - Extract participant names and key terms → create `hotwords.txt`
@@ -193,6 +198,7 @@ validates that no audio is lost (detects silent truncation).
 | `--title "..."` | Output document title |
 | `--clean-cache` | Delete LLM chunk cache after completion |
 | `--output PATH` | Custom output file path |
+| `--model-cache-dir` | ModelScope model cache directory (~3GB, default: `~/.cache/modelscope/`) |
 
 ## Outputs
 

@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "skills": {
+    "autonomous-common": {
+      "source": "zxkane/autonomous-dev-team",
+      "sourceType": "github",
+      "computedHash": "e2a8cab7bd4a6472a5e15501019949b7837ac5fef49ea3e5775990bdd7756cea"
+    },
+    "autonomous-dev": {
+      "source": "zxkane/autonomous-dev-team",
+      "sourceType": "github",
+      "computedHash": "f084d35c385c58b5eb94a4d26f30a796bf7ead0e25a8c0cfc741218ade5abf5c"
+    },
+    "autonomous-dispatcher": {
+      "source": "zxkane/autonomous-dev-team",
+      "sourceType": "github",
+      "computedHash": "2f234dfe815a19151f7cb5c3b125a4059c9e730108dc368f0abe8842d5cf3931"
+    },
+    "autonomous-review": {
+      "source": "zxkane/autonomous-dev-team",
+      "sourceType": "github",
+      "computedHash": "74db4d8b8693eb3e1ffd13942d8f420755282a2e6a0c5b401ca1cb18328e3a6c"
+    },
+    "create-issue": {
+      "source": "zxkane/autonomous-dev-team",
+      "sourceType": "github",
+      "computedHash": "6e85141dcf2fbd76a48737a66ffa2ff6d4eab876c24db2bf3dc588acf11b4419"
+    }
+  }
+}

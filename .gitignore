@@ -42,8 +42,8 @@ CLAUDE.local.md
 .trae/
 .windsurf/
 
-# skills.sh lock file (we manage skills in-repo now)
-skills-lock.json
+# skills.sh lock file — tracked so others can run `npx skills install`
+# skills-lock.json
 
 # Temp files
 tmp/

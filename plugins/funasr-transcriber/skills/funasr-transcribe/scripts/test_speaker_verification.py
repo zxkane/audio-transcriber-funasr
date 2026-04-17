@@ -1,0 +1,752 @@
+#!/usr/bin/env python3
+"""Tests for speaker verification pipeline.
+
+Covers: llm_utils, verify_speakers, and speaker-related functions
+in transcribe_funasr. All LLM calls are mocked.
+"""
+
+import json
+import sys
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+from llm_utils import detect_llm_provider, is_retryable, call_llm
+import verify_speakers as vs
+
+
+# ──────────────────────────────────────────────
+# Fixtures
+# ──────────────────────────────────────────────
+
+def make_segment(speaker, start_ms, end_ms, text):
+    return {"speaker": speaker, "start_ms": start_ms, "end_ms": end_ms, "text": text}
+
+
+@pytest.fixture
+def two_speaker_transcript():
+    return [
+        make_segment(0, 0, 5000, "大家好，欢迎来到我们的节目"),
+        make_segment(0, 5000, 15000, "今天我们请到了一位特别的嘉宾"),
+        make_segment(1, 15000, 30000, "谢谢主持人，很高兴来到这里"),
+        make_segment(0, 30000, 45000, "能不能先给大家介绍一下你自己"),
+        make_segment(1, 45000, 90000, "好的，我是做人工智能研究的"),
+        make_segment(0, 90000, 120000, "那我们今天就来聊聊AI的发展"),
+    ]
+
+
+@pytest.fixture
+def four_speaker_transcript():
+    return [
+        make_segment(0, 0, 10000, "Let's start the meeting"),
+        make_segment(1, 10000, 25000, "I'll present the engineering update"),
+        make_segment(2, 25000, 40000, "Design review is ready for Q3"),
+        make_segment(3, 40000, 55000, "Budget looks good this quarter"),
+        make_segment(0, 55000, 70000, "Great, any questions?"),
+        make_segment(1, 70000, 90000, "We need more time for the migration"),
+    ]
+
+
+@pytest.fixture
+def speaker_context_podcast():
+    return {
+        "孟岩": "Host, asks questions, introduces topics",
+        "李继刚": "Guest, AI researcher, shares expertise",
+    }
+
+
+@pytest.fixture
+def speaker_context_meeting():
+    return {
+        "Alice": "Team lead, runs the meeting",
+        "Bob": "Engineer, gives technical updates",
+        "Carol": "Designer, presents design work",
+        "Dave": "Finance, reports on budget",
+    }
+
+
+# ──────────────────────────────────────────────
+# llm_utils: detect_llm_provider
+# ──────────────────────────────────────────────
+
+class TestDetectLLMProvider:
+    def test_bedrock_arn(self):
+        assert detect_llm_provider("arn:aws:bedrock:us-west-2:123:inference-profile/abc") == "bedrock"
+
+    def test_bedrock_cross_region(self):
+        assert detect_llm_provider("us.anthropic.claude-sonnet-4-6") == "bedrock"
+
+    def test_anthropic_bare_claude(self):
+        assert detect_llm_provider("claude-sonnet-4-6") == "anthropic"
+
+    def test_anthropic_claude_opus(self):
+        assert detect_llm_provider("claude-opus-4-7") == "anthropic"
+
+    def test_openai_gpt(self):
+        assert detect_llm_provider("gpt-4o") == "openai"
+
+    def test_openai_deepseek(self):
+        assert detect_llm_provider("deepseek-chat") == "openai"
+
+    def test_openai_default(self):
+        assert detect_llm_provider("some-custom-model") == "openai"
+
+
+# ──────────────────────────────────────────────
+# llm_utils: is_retryable
+# ──────────────────────────────────────────────
+
+class TestIsRetryable:
+    def test_rate_limit(self):
+        assert is_retryable(Exception("rate_limit_exceeded"))
+
+    def test_throttle(self):
+        assert is_retryable(Exception("throttling exception"))
+
+    def test_429(self):
+        assert is_retryable(Exception("HTTP 429 Too Many Requests"))
+
+    def test_529(self):
+        assert is_retryable(Exception("529 overloaded"))
+
+    def test_not_retryable(self):
+        assert not is_retryable(Exception("invalid api key"))
+
+    def test_not_retryable_generic(self):
+        assert not is_retryable(Exception("something went wrong"))
+
+
+# ──────────────────────────────────────────────
+# llm_utils: call_llm
+# ──────────────────────────────────────────────
+
+class TestCallLLM:
+    @patch("llm_utils._call_anthropic", return_value="test response")
+    def test_anthropic_routing(self, mock_call):
+        result = call_llm("sys", "user", "claude-sonnet-4-6")
+        assert result == "test response"
+        mock_call.assert_called_once_with("sys", "user", "claude-sonnet-4-6")
+
+    @patch("llm_utils._call_bedrock", return_value="bedrock response")
+    def test_bedrock_routing(self, mock_call):
+        result = call_llm("sys", "user", "us.anthropic.claude-sonnet-4-6", region="us-east-1")
+        assert result == "bedrock response"
+        mock_call.assert_called_once_with("sys", "user", "us.anthropic.claude-sonnet-4-6", "us-east-1")
+
+    @patch("llm_utils._call_openai", return_value="openai response")
+    def test_openai_routing(self, mock_call):
+        result = call_llm("sys", "user", "gpt-4o")
+        assert result == "openai response"
+        mock_call.assert_called_once_with("sys", "user", "gpt-4o")
+
+    @patch("llm_utils._call_anthropic")
+    def test_retry_on_rate_limit(self, mock_call):
+        mock_call.side_effect = [Exception("rate_limit_exceeded"), "ok"]
+        result = call_llm("sys", "user", "claude-sonnet-4-6", max_retries=2)
+        assert result == "ok"
+        assert mock_call.call_count == 2
+
+    @patch("llm_utils._call_anthropic")
+    def test_no_retry_on_auth_error(self, mock_call):
+        mock_call.side_effect = Exception("invalid api key")
+        with pytest.raises(Exception, match="invalid api key"):
+            call_llm("sys", "user", "claude-sonnet-4-6", max_retries=3)
+        assert mock_call.call_count == 1
+
+    @patch("llm_utils._call_bedrock", return_value="response")
+    def test_default_region(self, mock_call):
+        call_llm("sys", "user", "us.anthropic.claude-sonnet-4-6")
+        mock_call.assert_called_once_with("sys", "user", "us.anthropic.claude-sonnet-4-6", "us-west-2")
+
+
+# ──────────────────────────────────────────────
+# verify_speakers: helpers
+# ──────────────────────────────────────────────
+
+class TestFormatTimeMs:
+    def test_zero(self):
+        assert vs.format_time_ms(0) == "00:00:00"
+
+    def test_seconds(self):
+        assert vs.format_time_ms(5000) == "00:00:05"
+
+    def test_minutes(self):
+        assert vs.format_time_ms(90000) == "00:01:30"
+
+    def test_hours(self):
+        assert vs.format_time_ms(3661000) == "01:01:01"
+
+
+class TestBuildSpeakerMap:
+    def test_two_speakers(self, two_speaker_transcript):
+        m = vs.build_speaker_map(two_speaker_transcript, ["Host", "Guest"])
+        assert m == {0: "Host", 1: "Guest"}
+
+    def test_more_names_than_speakers(self, two_speaker_transcript):
+        m = vs.build_speaker_map(two_speaker_transcript, ["A", "B", "C"])
+        assert m == {0: "A", 1: "B"}
+
+    def test_fewer_names_than_speakers(self, two_speaker_transcript):
+        m = vs.build_speaker_map(two_speaker_transcript, ["OnlyOne"])
+        assert m[0] == "OnlyOne"
+        assert m[1] == "Speaker 2"
+
+    def test_preserves_appearance_order(self):
+        transcript = [
+            make_segment(2, 0, 1000, "first"),
+            make_segment(0, 1000, 2000, "second"),
+        ]
+        m = vs.build_speaker_map(transcript, ["Alpha", "Beta"])
+        assert m == {2: "Alpha", 0: "Beta"}
+
+
+class TestExtractEarlyTranscript:
+    def test_respects_cutoff(self, two_speaker_transcript):
+        speaker_map = {0: "Host", 1: "Guest"}
+        result = vs.extract_early_transcript(two_speaker_transcript, 1, speaker_map)
+        lines = result.strip().split("\n")
+        for line in lines:
+            assert "Host:" in line or "Guest:" in line
+
+    def test_empty_transcript(self):
+        assert vs.extract_early_transcript([], 5, {}) == ""
+
+    def test_includes_timestamp(self, two_speaker_transcript):
+        speaker_map = {0: "H", 1: "G"}
+        result = vs.extract_early_transcript(two_speaker_transcript, 5, speaker_map)
+        assert "[00:00:00]" in result
+
+
+class TestComputeSpeakerStats:
+    def test_counts_segments_and_chars(self, two_speaker_transcript):
+        speaker_map = {0: "Host", 1: "Guest"}
+        stats = vs.compute_speaker_stats(two_speaker_transcript, speaker_map)
+        assert stats["Host"]["segments"] == 4
+        assert stats["Guest"]["segments"] == 2
+        assert stats["Host"]["chars"] > 0
+        assert stats["Guest"]["chars"] > 0
+
+    def test_with_minutes_cutoff(self, two_speaker_transcript):
+        speaker_map = {0: "Host", 1: "Guest"}
+        stats_full = vs.compute_speaker_stats(two_speaker_transcript, speaker_map)
+        stats_limited = vs.compute_speaker_stats(two_speaker_transcript, speaker_map, minutes=1)
+        total_full = sum(s["segments"] for s in stats_full.values())
+        total_limited = sum(s["segments"] for s in stats_limited.values())
+        assert total_limited <= total_full
+
+
+# ──────────────────────────────────────────────
+# verify_speakers: apply_swap
+# ──────────────────────────────────────────────
+
+class TestApplySwap:
+    def test_swaps_two_speakers(self):
+        transcript = [
+            make_segment(0, 0, 1000, "hello"),
+            make_segment(1, 1000, 2000, "world"),
+            make_segment(0, 2000, 3000, "foo"),
+        ]
+        speaker_map = {0: "Alice", 1: "Bob"}
+        vs.apply_swap(transcript, speaker_map, 0, 1)
+        assert transcript[0]["speaker"] == 1
+        assert transcript[1]["speaker"] == 0
+        assert transcript[2]["speaker"] == 1
+        assert speaker_map[0] == "Bob"
+        assert speaker_map[1] == "Alice"
+
+    def test_swap_is_reversible(self):
+        transcript = [make_segment(0, 0, 1000, "a"), make_segment(1, 1000, 2000, "b")]
+        speaker_map = {0: "X", 1: "Y"}
+        vs.apply_swap(transcript, speaker_map, 0, 1)
+        vs.apply_swap(transcript, speaker_map, 0, 1)
+        assert transcript[0]["speaker"] == 0
+        assert transcript[1]["speaker"] == 1
+        assert speaker_map == {0: "X", 1: "Y"}
+
+
+# ──────────────────────────────────────────────
+# verify_speakers: apply_meeting_mapping
+# ──────────────────────────────────────────────
+
+class TestApplyMeetingMapping:
+    def test_no_changes(self):
+        transcript = [make_segment(0, 0, 1000, "hello")]
+        speaker_map = {0: "Alice", 1: "Bob"}
+        mapping = {"Alice": "Alice", "Bob": "Bob"}
+        vs.apply_meeting_mapping(transcript, speaker_map, mapping)
+        assert transcript[0]["speaker"] == 0
+
+    def test_simple_swap(self):
+        transcript = [
+            make_segment(0, 0, 1000, "a"),
+            make_segment(1, 1000, 2000, "b"),
+        ]
+        speaker_map = {0: "Alice", 1: "Bob"}
+        mapping = {"Alice": "Bob", "Bob": "Alice"}
+        vs.apply_meeting_mapping(transcript, speaker_map, mapping)
+        assert transcript[0]["speaker"] == 1
+        assert transcript[1]["speaker"] == 0
+
+    def test_partial_mapping_ignored(self):
+        transcript = [
+            make_segment(0, 0, 1000, "a"),
+            make_segment(1, 1000, 2000, "b"),
+        ]
+        speaker_map = {0: "Alice", 1: "Bob"}
+        mapping = {"Alice": "Alice"}
+        vs.apply_meeting_mapping(transcript, speaker_map, mapping)
+        assert transcript[0]["speaker"] == 0
+        assert transcript[1]["speaker"] == 1
+
+    def test_three_way_rotation(self):
+        transcript = [
+            make_segment(0, 0, 1000, "a"),
+            make_segment(1, 1000, 2000, "b"),
+            make_segment(2, 2000, 3000, "c"),
+        ]
+        speaker_map = {0: "A", 1: "B", 2: "C"}
+        mapping = {"A": "B", "B": "A", "C": "C"}
+        vs.apply_meeting_mapping(transcript, speaker_map, mapping)
+        assert transcript[0]["speaker"] == 1
+        assert transcript[1]["speaker"] == 0
+        assert transcript[2]["speaker"] == 2
+
+
+# ──────────────────────────────────────────────
+# verify_speakers: verify_podcast (mocked LLM)
+# ──────────────────────────────────────────────
+
+class TestVerifyPodcast:
+    @patch("verify_speakers.call_llm")
+    def test_correct_verdict(self, mock_llm):
+        mock_llm.return_value = "VERDICT: CORRECT\nCONFIDENCE: HIGH\nEVIDENCE: labels match roles"
+        speaker_map = {0: "Host", 1: "Guest"}
+        ctx = {"Host": "asks questions", "Guest": "answers"}
+        result = vs.verify_podcast("transcript text", speaker_map, ctx, "model", "us-west-2")
+        assert result["verdict"] == "CORRECT"
+        assert result["confidence"] == "HIGH"
+
+    @patch("verify_speakers.call_llm")
+    def test_swap_verdict(self, mock_llm):
+        mock_llm.return_value = "VERDICT: SWAP\nCONFIDENCE: HIGH\nEVIDENCE: host is answering"
+        speaker_map = {0: "Host", 1: "Guest"}
+        ctx = {"Host": "asks questions", "Guest": "answers"}
+        result = vs.verify_podcast("transcript text", speaker_map, ctx, "model", "us-west-2")
+        assert result["verdict"] == "SWAP"
+
+    @patch("verify_speakers.call_llm")
+    def test_malformed_response(self, mock_llm):
+        mock_llm.return_value = "I cannot determine the speaker roles from this text."
+        speaker_map = {0: "Host", 1: "Guest"}
+        ctx = {"Host": "asks questions", "Guest": "answers"}
+        result = vs.verify_podcast("transcript text", speaker_map, ctx, "model", "us-west-2")
+        assert result["verdict"] == "UNKNOWN"
+        assert result["confidence"] == "LOW"
+
+
+# ──────────────────────────────────────────────
+# verify_speakers: verify_meeting (mocked LLM)
+# ──────────────────────────────────────────────
+
+class TestVerifyMeeting:
+    @patch("verify_speakers.call_llm")
+    def test_correct_mapping(self, mock_llm):
+        mock_llm.return_value = json.dumps({
+            "correct": True,
+            "confidence": "HIGH",
+            "mapping": {"Alice": "Alice", "Bob": "Bob"},
+            "evidence": {"Alice": "leads meeting", "Bob": "gives updates"},
+        })
+        speaker_map = {0: "Alice", 1: "Bob"}
+        ctx = {"Alice": "team lead", "Bob": "engineer"}
+        result = vs.verify_meeting("text", speaker_map, ctx, "model", "us-west-2")
+        assert result["correct"] is True
+        assert result["mapping"]["Alice"] == "Alice"
+
+    @patch("verify_speakers.call_llm")
+    def test_swapped_mapping(self, mock_llm):
+        mock_llm.return_value = '```json\n{"correct": false, "confidence": "HIGH", "mapping": {"Alice": "Bob", "Bob": "Alice"}, "evidence": {}}\n```'
+        speaker_map = {0: "Alice", 1: "Bob"}
+        ctx = {"Alice": "team lead", "Bob": "engineer"}
+        result = vs.verify_meeting("text", speaker_map, ctx, "model", "us-west-2")
+        assert result["correct"] is False
+        assert result["mapping"]["Alice"] == "Bob"
+
+    @patch("verify_speakers.call_llm")
+    def test_no_json_in_response(self, mock_llm):
+        mock_llm.return_value = "I'm not sure about the speaker assignments."
+        speaker_map = {0: "Alice", 1: "Bob"}
+        ctx = {"Alice": "leader", "Bob": "engineer"}
+        result = vs.verify_meeting("text", speaker_map, ctx, "model", "us-west-2")
+        assert result["correct"] is None
+        assert "raw" in result
+
+    @patch("verify_speakers.call_llm")
+    def test_invalid_json_in_response(self, mock_llm):
+        mock_llm.return_value = '{"mapping": invalid json here}'
+        speaker_map = {0: "Alice", 1: "Bob"}
+        ctx = {"Alice": "leader", "Bob": "engineer"}
+        result = vs.verify_meeting("text", speaker_map, ctx, "model", "us-west-2")
+        assert result["correct"] is None
+
+
+# ──────────────────────────────────────────────
+# transcribe_funasr: speaker verification functions
+# ──────────────────────────────────────────────
+
+import transcribe_funasr as tf
+
+
+class TestTranscribeMergeConsecutive:
+    def test_merges_same_speaker(self):
+        transcript = [
+            make_segment(0, 0, 1000, "hello "),
+            make_segment(0, 1500, 2500, "world"),
+        ]
+        merged = tf.merge_consecutive(transcript)
+        assert len(merged) == 1
+        assert merged[0]["text"] == "hello world"
+
+    def test_no_merge_different_speakers(self):
+        transcript = [
+            make_segment(0, 0, 1000, "hello"),
+            make_segment(1, 1500, 2500, "world"),
+        ]
+        merged = tf.merge_consecutive(transcript)
+        assert len(merged) == 2
+
+    def test_no_merge_large_gap(self):
+        transcript = [
+            make_segment(0, 0, 1000, "hello"),
+            make_segment(0, 5000, 6000, "world"),
+        ]
+        merged = tf.merge_consecutive(transcript)
+        assert len(merged) == 2
+
+    def test_empty_transcript(self):
+        assert tf.merge_consecutive([]) == []
+
+
+class TestTranscribeBuildSpeakerMap:
+    def test_with_names(self):
+        transcript = [make_segment(0, 0, 1000, "a"), make_segment(1, 1000, 2000, "b")]
+        m = tf.build_speaker_map(transcript, ["Alice", "Bob"])
+        assert m == {0: "Alice", 1: "Bob"}
+
+    def test_without_names(self):
+        transcript = [make_segment(0, 0, 1000, "a"), make_segment(1, 1000, 2000, "b")]
+        m = tf.build_speaker_map(transcript)
+        assert m == {0: "Speaker 1", 1: "Speaker 2"}
+
+
+class TestVerifySpeakerAssignment:
+    def test_detects_chinese_self_intro_mismatch(self):
+        transcript = [
+            make_segment(0, 0, 5000, "大家好我是李继刚"),
+            make_segment(1, 5000, 10000, "你好"),
+        ]
+        speaker_map = {0: "孟岩", 1: "李继刚"}
+        result = tf.verify_speaker_assignment(transcript, speaker_map, ["孟岩", "李继刚"])
+        assert result[0] == "李继刚"
+        assert result[1] == "孟岩"
+
+    def test_confirms_correct_assignment(self):
+        transcript = [
+            make_segment(0, 0, 5000, "大家好我是孟岩"),
+            make_segment(1, 5000, 10000, "你好"),
+        ]
+        speaker_map = {0: "孟岩", 1: "李继刚"}
+        result = tf.verify_speaker_assignment(transcript, speaker_map, ["孟岩", "李继刚"])
+        assert result[0] == "孟岩"
+
+    def test_english_self_intro(self):
+        transcript = [
+            make_segment(0, 0, 5000, "Hi everyone I'm Bob"),
+            make_segment(1, 5000, 10000, "Welcome"),
+        ]
+        speaker_map = {0: "Alice", 1: "Bob"}
+        result = tf.verify_speaker_assignment(transcript, speaker_map, ["Alice", "Bob"])
+        assert result[0] == "Bob"
+        assert result[1] == "Alice"
+
+    def test_no_intro_returns_unchanged(self):
+        transcript = [
+            make_segment(0, 0, 5000, "今天天气不错"),
+            make_segment(1, 5000, 10000, "是的"),
+        ]
+        speaker_map = {0: "A", 1: "B"}
+        result = tf.verify_speaker_assignment(transcript, speaker_map, ["A", "B"])
+        assert result == {0: "A", 1: "B"}
+
+    def test_no_speaker_names_returns_unchanged(self):
+        transcript = [make_segment(0, 0, 5000, "hello")]
+        speaker_map = {0: "Speaker 1"}
+        result = tf.verify_speaker_assignment(transcript, speaker_map, None)
+        assert result == {0: "Speaker 1"}
+
+
+class TestChunkByDuration:
+    def test_single_chunk(self):
+        items = [make_segment(0, 0, 1000, "a"), make_segment(0, 1000, 2000, "b")]
+        chunks = tf.chunk_by_duration(items, duration_ms=900000)
+        assert len(chunks) == 1
+
+    def test_multiple_chunks(self):
+        items = [
+            make_segment(0, 0, 1000, "first"),
+            make_segment(0, 1000000, 1001000, "second"),
+        ]
+        chunks = tf.chunk_by_duration(items, duration_ms=900000)
+        assert len(chunks) == 2
+
+    def test_empty(self):
+        assert tf.chunk_by_duration([]) == []
+
+
+class TestFormatChunk:
+    def test_formats_with_names(self):
+        chunk = [make_segment(0, 0, 1000, "hello"), make_segment(1, 1000, 2000, "world")]
+        speaker_map = {0: "Alice", 1: "Bob"}
+        result = tf.format_chunk(chunk, speaker_map)
+        assert "[00:00:00] Alice: hello" in result
+        assert "[00:00:01] Bob: world" in result
+
+
+class TestBuildSystemPrompt:
+    def test_base_prompt(self):
+        prompt = tf.build_system_prompt()
+        assert "transcript editor" in prompt
+        assert "Keep timestamps unchanged" in prompt
+
+    def test_with_speaker_names(self):
+        prompt = tf.build_system_prompt(speaker_names=["Alice", "Bob"])
+        assert "Alice" in prompt
+        assert "Bob" in prompt
+
+    def test_with_speaker_context(self):
+        ctx = {"Alice": "team lead", "Bob": "engineer"}
+        prompt = tf.build_system_prompt(speaker_context=ctx)
+        assert "team lead" in prompt
+        assert "engineer" in prompt
+
+    def test_with_reference_text(self):
+        prompt = tf.build_system_prompt(reference_text="Meeting about Q3 roadmap")
+        assert "Q3 roadmap" in prompt
+
+    def test_reference_truncation(self):
+        long_ref = "x" * 5000
+        prompt = tf.build_system_prompt(reference_text=long_ref)
+        assert "[...truncated]" in prompt
+
+
+# ──────────────────────────────────────────────
+# transcribe_funasr: _verify_speaker_roles_via_llm
+# ──────────────────────────────────────────────
+
+class TestVerifySpeakerRolesViaLLM:
+    @patch("transcribe_funasr.call_llm", return_value="CORRECT")
+    def test_correct_keeps_map(self, mock_llm):
+        speaker_map = {0: "Host", 1: "Guest"}
+        ctx = {"Host": "asks questions", "Guest": "answers"}
+        result = tf._verify_speaker_roles_via_llm("text", speaker_map, ctx, "model", "us-west-2")
+        assert result[0] == "Host"
+        assert result[1] == "Guest"
+
+    @patch("transcribe_funasr.call_llm", return_value="SWAP")
+    def test_swap_two_speakers(self, mock_llm):
+        speaker_map = {0: "Host", 1: "Guest"}
+        ctx = {"Host": "asks questions", "Guest": "answers"}
+        result = tf._verify_speaker_roles_via_llm("text", speaker_map, ctx, "model", "us-west-2")
+        assert result[0] == "Guest"
+        assert result[1] == "Host"
+
+    @patch("transcribe_funasr.call_llm", return_value="I'm not sure about this")
+    def test_ambiguous_keeps_map(self, mock_llm):
+        speaker_map = {0: "Host", 1: "Guest"}
+        ctx = {"Host": "asks questions", "Guest": "answers"}
+        result = tf._verify_speaker_roles_via_llm("text", speaker_map, ctx, "model", "us-west-2")
+        assert result[0] == "Host"
+        assert result[1] == "Guest"
+
+    @patch("transcribe_funasr.call_llm")
+    def test_llm_failure_keeps_map(self, mock_llm):
+        mock_llm.side_effect = RuntimeError("API error")
+        speaker_map = {0: "Host", 1: "Guest"}
+        ctx = {"Host": "asks questions", "Guest": "answers"}
+        result = tf._verify_speaker_roles_via_llm("text", speaker_map, ctx, "model", "us-west-2")
+        assert result[0] == "Host"
+        assert result[1] == "Guest"
+
+    @patch("transcribe_funasr.call_llm")
+    def test_import_error_propagates(self, mock_llm):
+        mock_llm.side_effect = ImportError("No module named 'boto3'")
+        speaker_map = {0: "Host", 1: "Guest"}
+        ctx = {"Host": "asks questions", "Guest": "answers"}
+        with pytest.raises(ImportError):
+            tf._verify_speaker_roles_via_llm("text", speaker_map, ctx, "model", "us-west-2")
+
+    @patch("transcribe_funasr.call_llm")
+    def test_multi_speaker_json_swap(self, mock_llm):
+        mock_llm.return_value = json.dumps({
+            "correct": False,
+            "mapping": {"Alice": "Bob", "Bob": "Alice", "Carol": "Carol"},
+        })
+        speaker_map = {0: "Alice", 1: "Bob", 2: "Carol"}
+        ctx = {"Alice": "leader", "Bob": "eng", "Carol": "design"}
+        result = tf._verify_speaker_roles_via_llm("text", speaker_map, ctx, "model", "us-west-2")
+        assert result[0] == "Bob"
+        assert result[1] == "Alice"
+        assert result[2] == "Carol"
+
+    @patch("transcribe_funasr.call_llm")
+    def test_multi_speaker_correct(self, mock_llm):
+        mock_llm.return_value = json.dumps({
+            "correct": True,
+            "mapping": {"Alice": "Alice", "Bob": "Bob", "Carol": "Carol"},
+        })
+        speaker_map = {0: "Alice", 1: "Bob", 2: "Carol"}
+        ctx = {"Alice": "leader", "Bob": "eng", "Carol": "design"}
+        result = tf._verify_speaker_roles_via_llm("text", speaker_map, ctx, "model", "us-west-2")
+        assert result[0] == "Alice"
+
+    @patch("transcribe_funasr.call_llm")
+    def test_multi_speaker_invalid_json_keeps_map(self, mock_llm):
+        mock_llm.return_value = "not valid json at all"
+        speaker_map = {0: "Alice", 1: "Bob", 2: "Carol"}
+        ctx = {"Alice": "leader", "Bob": "eng", "Carol": "design"}
+        result = tf._verify_speaker_roles_via_llm("text", speaker_map, ctx, "model", "us-west-2")
+        assert result == {0: "Alice", 1: "Bob", 2: "Carol"}
+
+    @patch("transcribe_funasr.call_llm")
+    def test_multi_speaker_three_way_cycle(self, mock_llm):
+        mock_llm.return_value = json.dumps({
+            "correct": False,
+            "mapping": {"Alice": "Bob", "Bob": "Carol", "Carol": "Alice"},
+        })
+        speaker_map = {0: "Alice", 1: "Bob", 2: "Carol"}
+        ctx = {"Alice": "leader", "Bob": "eng", "Carol": "design"}
+        result = tf._verify_speaker_roles_via_llm("text", speaker_map, ctx, "model", "us-west-2")
+        assert result[0] == "Bob"
+        assert result[1] == "Carol"
+        assert result[2] == "Alice"
+
+    @patch("transcribe_funasr.call_llm")
+    def test_multi_speaker_duplicate_targets_rejected(self, mock_llm):
+        mock_llm.return_value = json.dumps({
+            "correct": False,
+            "mapping": {"Alice": "Carol", "Bob": "Carol", "Carol": "Alice"},
+        })
+        speaker_map = {0: "Alice", 1: "Bob", 2: "Carol"}
+        ctx = {"Alice": "leader", "Bob": "eng", "Carol": "design"}
+        result = tf._verify_speaker_roles_via_llm("text", speaker_map, ctx, "model", "us-west-2")
+        assert result == {0: "Alice", 1: "Bob", 2: "Carol"}
+
+
+# ──────────────────────────────────────────────
+# Integration: main() with mock LLM
+# ──────────────────────────────────────────────
+
+class TestVerifySpeakersMain:
+    def _write_fixtures(self, tmpdir, transcript, context):
+        json_path = tmpdir / "transcript.json"
+        ctx_path = tmpdir / "context.json"
+        json_path.write_text(json.dumps(transcript, ensure_ascii=False), encoding="utf-8")
+        ctx_path.write_text(json.dumps(context, ensure_ascii=False), encoding="utf-8")
+        return json_path, ctx_path
+
+    @patch("verify_speakers.call_llm")
+    def test_podcast_swap_dryrun(self, mock_llm, two_speaker_transcript,
+                                  speaker_context_podcast, tmp_path):
+        mock_llm.return_value = "VERDICT: SWAP\nCONFIDENCE: HIGH\nEVIDENCE: labels are swapped"
+        json_path, ctx_path = self._write_fixtures(
+            tmp_path, two_speaker_transcript, speaker_context_podcast)
+        sys.argv = ["verify_speakers.py", str(json_path),
+                     "--speakers", "孟岩,李继刚",
+                     "--speaker-context", str(ctx_path)]
+        vs.main()
+        with open(json_path, encoding="utf-8") as f:
+            data = json.load(f)
+        assert data[0]["speaker"] == 0  # unchanged — dry-run doesn't modify
+
+    @patch("verify_speakers.call_llm")
+    def test_podcast_swap_fix(self, mock_llm, two_speaker_transcript,
+                               speaker_context_podcast, tmp_path):
+        mock_llm.return_value = "VERDICT: SWAP\nCONFIDENCE: HIGH\nEVIDENCE: labels are swapped"
+        json_path, ctx_path = self._write_fixtures(
+            tmp_path, two_speaker_transcript, speaker_context_podcast)
+        sys.argv = ["verify_speakers.py", str(json_path),
+                     "--speakers", "孟岩,李继刚",
+                     "--speaker-context", str(ctx_path), "--fix"]
+        vs.main()
+        with open(json_path, encoding="utf-8") as f:
+            data = json.load(f)
+        assert data[0]["speaker"] == 1  # swapped
+
+    @patch("verify_speakers.call_llm")
+    def test_podcast_correct_no_changes(self, mock_llm, two_speaker_transcript,
+                                         speaker_context_podcast, tmp_path):
+        mock_llm.return_value = "VERDICT: CORRECT\nCONFIDENCE: HIGH\nEVIDENCE: looks good"
+        json_path, ctx_path = self._write_fixtures(
+            tmp_path, two_speaker_transcript, speaker_context_podcast)
+        sys.argv = ["verify_speakers.py", str(json_path),
+                     "--speakers", "孟岩,李继刚",
+                     "--speaker-context", str(ctx_path), "--fix"]
+        vs.main()
+        with open(json_path, encoding="utf-8") as f:
+            data = json.load(f)
+        assert data[0]["speaker"] == 0  # unchanged
+
+    @patch("verify_speakers.call_llm")
+    def test_unknown_verdict_exits_2(self, mock_llm, two_speaker_transcript,
+                                      speaker_context_podcast, tmp_path):
+        mock_llm.return_value = "VERDICT: MAYBE\nCONFIDENCE: LOW\nEVIDENCE: unclear"
+        json_path, ctx_path = self._write_fixtures(
+            tmp_path, two_speaker_transcript, speaker_context_podcast)
+        sys.argv = ["verify_speakers.py", str(json_path),
+                     "--speakers", "孟岩,李继刚",
+                     "--speaker-context", str(ctx_path)]
+        with pytest.raises(SystemExit) as exc_info:
+            vs.main()
+        assert exc_info.value.code == 2
+
+    @patch("verify_speakers.call_llm")
+    def test_meeting_inconclusive_exits_2(self, mock_llm, four_speaker_transcript,
+                                           speaker_context_meeting, tmp_path):
+        mock_llm.return_value = "I don't know"
+        json_path, ctx_path = self._write_fixtures(
+            tmp_path, four_speaker_transcript, speaker_context_meeting)
+        sys.argv = ["verify_speakers.py", str(json_path),
+                     "--speakers", "Alice,Bob,Carol,Dave",
+                     "--speaker-context", str(ctx_path)]
+        with pytest.raises(SystemExit) as exc_info:
+            vs.main()
+        assert exc_info.value.code == 2
+
+    def test_missing_context_file_exits_1(self, two_speaker_transcript, tmp_path):
+        json_path = tmp_path / "transcript.json"
+        json_path.write_text(json.dumps(two_speaker_transcript), encoding="utf-8")
+        sys.argv = ["verify_speakers.py", str(json_path),
+                     "--speakers", "A,B",
+                     "--speaker-context", str(tmp_path / "nonexistent.json")]
+        with pytest.raises(SystemExit) as exc_info:
+            vs.main()
+        assert exc_info.value.code == 1
+
+    def test_invalid_json_context_exits_1(self, two_speaker_transcript, tmp_path):
+        json_path = tmp_path / "transcript.json"
+        json_path.write_text(json.dumps(two_speaker_transcript), encoding="utf-8")
+        ctx_path = tmp_path / "bad.json"
+        ctx_path.write_text("not valid json {{{", encoding="utf-8")
+        sys.argv = ["verify_speakers.py", str(json_path),
+                     "--speakers", "A,B",
+                     "--speaker-context", str(ctx_path)]
+        with pytest.raises(SystemExit) as exc_info:
+            vs.main()
+        assert exc_info.value.code == 1
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

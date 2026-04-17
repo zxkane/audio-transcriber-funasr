@@ -16,9 +16,11 @@ Audio File (.m4a/.mp3/.wav)
   │
   ├─ [Phase 2: Post-process]
   │   ├─ Merge consecutive same-speaker utterances (<2s gap)
-  │   └─ Map speaker IDs to names (if provided)
+  │   ├─ Map speaker IDs to names (if provided)
+  │   └─ Auto-verify via self-introduction detection
   │
   └─ [Phase 3: LLM cleanup] ──► transcript.md
+      ├─ LLM speaker role verification (if --speaker-context provided)
       ├─ Remove fillers (um, uh, 嗯, 啊, etc.)
       ├─ Fix ASR errors (homophones, context-based)
       ├─ Polish grammar while preserving meaning
@@ -158,6 +160,24 @@ The patch (`scripts/patch_clustering.py`) replaces this with:
 - Vectorized `p_pruning()` — replaces Python loop with numpy broadcasting
 
 **Always run the patch before processing meetings longer than ~1 hour.**
+
+## Speaker Role Verification
+
+Speaker names are assigned by first-appearance order in the audio, which may
+swap host/guest labels (especially in podcasts). Two layers of automatic
+verification, plus a standalone post-hoc tool:
+
+1. **Phase 2 — self-introduction detection**: scans the first 5 minutes for
+   explicit self-introductions ("我是X", "I'm X") and swaps labels if mismatched
+2. **Phase 3 — LLM role verification**: when `--speaker-context` is provided,
+   the LLM analyzes the first chunk (up to 15 minutes) before cleanup begins.
+   For 2 speakers: binary CORRECT/SWAP detection. For 3+ speakers: full
+   JSON-based reassignment matching each label to the correct person.
+3. **Post-hoc — `verify_speakers.py`**: standalone script that verifies any
+   existing `*_raw_transcript.json`. Same two modes (2-speaker swap, N-speaker
+   reassignment) with dry-run support. See SKILL.md § Verify Speaker Labels.
+
+For podcasts, always provide `--speaker-context` describing host/guest roles.
 
 ## Speaker Diarization Limitations
 

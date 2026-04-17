@@ -58,6 +58,9 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Optional
+
+from llm_utils import call_llm, detect_llm_provider
 
 
 # ──────────────────────────────────────────────
@@ -216,10 +219,10 @@ def _is_16k_mono(path: str) -> bool:
 # ──────────────────────────────────────────────
 
 def transcribe_with_funasr(audio_path: str, lang: str = "zh",
-                           num_speakers: int = None,
+                           num_speakers: Optional[int] = None,
                            device: str = "cuda:0",
                            batch_size_s: int = 300,
-                           hotwords: str = None) -> list:
+                           hotwords: Optional[str] = None) -> list:
     """Run FunASR for ASR and speaker diarization.
 
     Loads language-specific models and runs the full pipeline:
@@ -314,7 +317,7 @@ def merge_consecutive(transcript: list, gap_ms: int = 2000) -> list:
     return merged
 
 
-def build_speaker_map(transcript: list, speakers: list = None) -> dict:
+def build_speaker_map(transcript: list, speakers: Optional[list] = None) -> dict:
     """Build speaker ID -> display name mapping.
 
     If speaker names are provided, assign by first-appearance order.
@@ -335,7 +338,7 @@ def build_speaker_map(transcript: list, speakers: list = None) -> dict:
 
 
 def verify_speaker_assignment(transcript: list, speaker_map: dict,
-                              speaker_names: list = None) -> dict:
+                              speaker_names: Optional[list] = None) -> dict:
     """Auto-verify speaker assignment by detecting self-introductions.
 
     Scans the first 5 minutes of transcript. If a speaker says their own name
@@ -454,147 +457,18 @@ Rules:
 3. Merge stuttered/repeated expressions into fluent sentences
 4. Fix obvious ASR errors based on context
 5. Preserve original meaning — do not add content not in the original
-6. Keep speaker labels and timestamps unchanged
+6. Keep timestamps unchanged
 7. Preserve technical terms and proper nouns
 8. Output cleaned text only, format: [timestamp] Name: content"""
-
-
-# ──────────────────────────────────────────────
-# Multi-provider LLM support
-# ──────────────────────────────────────────────
-
-def _detect_llm_provider(model_id: str) -> str:
-    """Detect LLM provider from model ID string.
-
-    Returns one of: 'bedrock', 'anthropic', 'openai'.
-    """
-    # Bedrock: ARN or cross-region model ID (two-letter region prefix + dot)
-    if model_id.startswith("arn:aws:bedrock:") or re.match(r"^[a-z]{2}\.", model_id):
-        return "bedrock"
-    if "claude" in model_id and not model_id.startswith("arn:"):
-        return "anthropic"
-    # Default to openai-compatible for everything else (gpt-*, deepseek-*, etc.)
-    return "openai"
-
-
-def _call_bedrock(system_prompt: str, user_message: str,
-                  model_id: str, region: str, max_tokens: int = 8192) -> str:
-    """Call AWS Bedrock converse API. Supports inference profile ARNs."""
-    try:
-        import boto3
-        from botocore.config import Config
-    except ImportError:
-        raise RuntimeError(
-            "The 'boto3' package is required for Bedrock API calls. "
-            "Install it with: pip install boto3")
-
-    client = boto3.client(
-        "bedrock-runtime", region_name=region,
-        config=Config(read_timeout=300, connect_timeout=10, retries={"max_attempts": 3}),
-    )
-    response = client.converse(
-        modelId=model_id,
-        system=[{"text": system_prompt}],
-        messages=[{"role": "user", "content": [{"text": user_message}]}],
-        inferenceConfig={"maxTokens": max_tokens},
-    )
-    try:
-        return response["output"]["message"]["content"][0]["text"]
-    except (KeyError, IndexError) as e:
-        raise RuntimeError(
-            f"Unexpected Bedrock response structure: {e}. "
-            f"Response keys: {list(response.keys())}"
-        ) from e
-
-
-def _call_anthropic(system_prompt: str, user_message: str,
-                    model_id: str, max_tokens: int = 8192) -> str:
-    """Call Anthropic Messages API via the anthropic SDK."""
-    try:
-        from anthropic import Anthropic
-    except ImportError:
-        raise RuntimeError(
-            "The 'anthropic' package is required for Anthropic API calls. "
-            "Install it with: pip install anthropic")
-
-    client = Anthropic()  # Uses ANTHROPIC_API_KEY env var
-    response = client.messages.create(
-        model=model_id,
-        max_tokens=max_tokens,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_message}],
-    )
-    if not response.content:
-        raise RuntimeError(
-            f"Anthropic API returned empty content (stop_reason={response.stop_reason})")
-    return response.content[0].text
-
-
-def _call_openai(system_prompt: str, user_message: str,
-                 model_id: str, max_tokens: int = 8192) -> str:
-    """Call OpenAI-compatible API via the openai SDK.
-
-    Works with OpenAI, DeepSeek, vLLM, Ollama, etc.
-    Set OPENAI_BASE_URL for non-OpenAI endpoints.
-    """
-    try:
-        from openai import OpenAI
-    except ImportError:
-        raise RuntimeError(
-            "The 'openai' package is required for OpenAI-compatible API calls. "
-            "Install it with: pip install openai")
-
-    client = OpenAI()  # Uses OPENAI_API_KEY and optionally OPENAI_BASE_URL
-    response = client.chat.completions.create(
-        model=model_id,
-        max_tokens=max_tokens,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message},
-        ],
-    )
-    if not response.choices or response.choices[0].message.content is None:
-        raise RuntimeError(f"OpenAI API returned empty content for model {model_id}")
-    return response.choices[0].message.content
-
-
-def _is_retryable(e: Exception) -> bool:
-    """Check if an LLM exception is retryable (rate limit / throttling)."""
-    msg = str(e).lower()
-    return any(token in msg for token in ("throttl", "rate_limit", "ratelimit", "429", "529"))
-
-
-def call_llm(system_prompt: str, user_message: str,
-             model_id: str, region: str = None, max_retries: int = 3) -> str:
-    """Call LLM with auto-detected provider and retry logic."""
-    provider = _detect_llm_provider(model_id)
-    for attempt in range(max_retries):
-        try:
-            if provider == "bedrock":
-                return _call_bedrock(system_prompt, user_message,
-                                     model_id, region or "us-west-2")
-            elif provider == "anthropic":
-                return _call_anthropic(system_prompt, user_message, model_id)
-            else:
-                return _call_openai(system_prompt, user_message, model_id)
-        except Exception as e:
-            if attempt < max_retries - 1 and _is_retryable(e):
-                wait = 5 * (attempt + 1)
-                print(f"  LLM call attempt {attempt+1} failed ({type(e).__name__}), "
-                      f"retrying in {wait}s...")
-                time.sleep(wait)
-            else:
-                raise
-    raise RuntimeError("call_llm: all retries exhausted")  # unreachable, satisfies type checker
 
 
 # ──────────────────────────────────────────────
 # LLM cleanup with reference context
 # ──────────────────────────────────────────────
 
-def build_system_prompt(speaker_context: dict = None,
-                        reference_text: str = None,
-                        speaker_names: list = None) -> str:
+def build_system_prompt(speaker_context: Optional[dict] = None,
+                        reference_text: Optional[str] = None,
+                        speaker_names: Optional[list] = None) -> str:
     """Build the LLM system prompt, enriched with all available context."""
     prompt = DEFAULT_SYSTEM_PROMPT
 
@@ -630,19 +504,164 @@ def build_system_prompt(speaker_context: dict = None,
     return prompt
 
 
-def run_llm_cleanup(merged: list, speaker_map: dict, model_id: str, region: str,
-                    speaker_context: dict = None, cache_dir: Path = None,
-                    reference_text: str = None, speaker_names: list = None) -> list:
-    """Chunk merged transcript and clean each via LLM. Supports resume via cache_dir."""
-    system_prompt = build_system_prompt(speaker_context, reference_text, speaker_names)
+def _verify_speaker_roles_via_llm(first_chunk_text: str, speaker_map: dict,
+                                   speaker_context: dict, model_id: str,
+                                   region: str) -> dict:
+    """Verify and correct speaker label assignments using LLM content analysis.
 
+    For 2 speakers: binary CORRECT/SWAP detection.
+    For 3+ speakers: full reassignment via JSON mapping.
+    Returns the (possibly corrected) speaker_map.
+    """
+    names = list(speaker_map.values())
+    speaker_list = "\n".join(f"- {n}" for n in names)
+    context_lines = "\n".join(f"- {n}: {info}" for n, info in speaker_context.items())
+
+    if len(speaker_map) == 2:
+        return _verify_two_speakers(
+            first_chunk_text, speaker_map, speaker_list, context_lines, model_id, region)
+    return _verify_multi_speakers(
+        first_chunk_text, speaker_map, speaker_list, context_lines, model_id, region)
+
+
+def _verify_two_speakers(first_chunk_text: str, speaker_map: dict,
+                          speaker_list: str, context_lines: str,
+                          model_id: str, region: str) -> dict:
+    verify_prompt = (
+        "You are a speaker identification expert. Analyze the following transcript "
+        "excerpt and determine whether the speaker labels are correctly assigned.\n\n"
+        f"Current speaker assignments:\n{speaker_list}\n\n"
+        f"Expected speaker roles:\n{context_lines}\n\n"
+        "Analyze the CONTENT of what each speaker says:\n"
+        "- Who introduces the show/topic or the other person? (likely host)\n"
+        "- Who asks questions and guides conversation? (likely host)\n"
+        "- Who answers questions and shares expertise/stories? (likely guest)\n"
+        "- Who does opening/closing remarks? (likely host)\n\n"
+        "Respond with EXACTLY one line:\n"
+        "- If labels are correct: CORRECT\n"
+        "- If labels are swapped: SWAP\n"
+        "No explanation, just the single word."
+    )
+    try:
+        result = call_llm(verify_prompt, first_chunk_text, model_id, region)
+    except ImportError:
+        raise
+    except Exception as e:
+        print(f"  LLM speaker verification failed ({type(e).__name__}: {e}), "
+              f"proceeding with original labels")
+        return speaker_map
+
+    verdict = result.strip().upper()
+    if verdict in ("SWAP", "SWAPPED"):
+        ids = list(speaker_map.keys())
+        old_first, old_second = speaker_map[ids[0]], speaker_map[ids[1]]
+        speaker_map[ids[0]], speaker_map[ids[1]] = old_second, old_first
+        print(f"  LLM speaker verification: SWAPPED labels "
+              f"({old_first} ↔ {old_second})")
+    elif verdict in ("CORRECT", "OK"):
+        print("  LLM speaker verification: labels CONFIRMED correct")
+    else:
+        print(f"  LLM speaker verification: ambiguous response "
+              f"'{result.strip()[:80]}', proceeding with original labels")
+    return speaker_map
+
+
+def _verify_multi_speakers(first_chunk_text: str, speaker_map: dict,
+                            speaker_list: str, context_lines: str,
+                            model_id: str, region: str) -> dict:
+    verify_prompt = (
+        "You are a speaker identification expert for multi-speaker recordings. "
+        "Analyze the transcript excerpt and determine whether each speaker label "
+        "is correctly matched to the right person.\n\n"
+        f"Current speaker label assignments:\n{speaker_list}\n\n"
+        f"Expected speaker roles/descriptions:\n{context_lines}\n\n"
+        "For each speaker, analyze what they talk about and how they speak, "
+        "then match them to the correct person from the expected roles.\n\n"
+        "Respond in this exact JSON format (no other text):\n"
+        "```json\n"
+        "{\n"
+        '  "correct": true,\n'
+        '  "mapping": {"current_label_1": "correct_name_1", ...}\n'
+        "}\n"
+        "```\n"
+        "If labels are already correct, mapping should echo the current assignments."
+    )
+    try:
+        result = call_llm(verify_prompt, first_chunk_text, model_id, region)
+    except ImportError:
+        raise
+    except Exception as e:
+        print(f"  LLM speaker verification failed ({type(e).__name__}: {e}), "
+              f"proceeding with original labels")
+        return speaker_map
+
+    json_match = re.search(r"\{[\s\S]*\}", result)
+    if not json_match:
+        print(f"  LLM speaker verification: could not parse response, "
+              f"proceeding with original labels")
+        return speaker_map
+
+    try:
+        parsed = json.loads(json_match.group())
+    except json.JSONDecodeError:
+        print(f"  LLM speaker verification: invalid JSON in response, "
+              f"proceeding with original labels")
+        return speaker_map
+
+    mapping = parsed.get("mapping", {})
+    has_changes = any(k != v for k, v in mapping.items())
+    if not has_changes:
+        print("  LLM speaker verification: labels CONFIRMED correct")
+        return speaker_map
+
+    # Validate: all names in mapping must be known speakers
+    known_names = set(speaker_map.values())
+    targets = [v for k, v in mapping.items() if k != v]
+    if len(targets) != len(set(targets)):
+        print("  LLM speaker verification: duplicate targets in mapping, skipping")
+        return speaker_map
+    unknown = [n for n in targets if n not in known_names]
+    if unknown:
+        print(f"  LLM speaker verification: unknown speakers {unknown}, skipping")
+        return speaker_map
+
+    # Build the full permutation atomically (handles 3+ way cycles)
+    name_to_id = {v: k for k, v in speaker_map.items()}
+    new_map = {}
+    changes = []
+    for current_label, correct_name in mapping.items():
+        sid = name_to_id.get(current_label)
+        if sid is not None and current_label != correct_name:
+            new_map[sid] = correct_name
+            changes.append((current_label, correct_name))
+        elif sid is not None:
+            new_map[sid] = current_label
+
+    speaker_map.update(new_map)
+    for old, new in changes:
+        print(f"  LLM speaker verification: {old} → {new}")
+    return speaker_map
+
+
+def run_llm_cleanup(merged: list, speaker_map: dict, model_id: str, region: str,
+                    speaker_context: Optional[dict] = None, cache_dir: Optional[Path] = None,
+                    reference_text: Optional[str] = None, speaker_names: Optional[list] = None) -> list:
+    """Chunk merged transcript and clean each via LLM. Supports resume via cache_dir."""
     chunks = chunk_by_duration(merged)
+
+    # Pre-cleanup: verify speaker roles using LLM analysis of first chunk
+    if speaker_context and len(speaker_map) >= 2 and chunks:
+        first_chunk_text = format_chunk(chunks[0], speaker_map)
+        speaker_map = _verify_speaker_roles_via_llm(
+            first_chunk_text, speaker_map, speaker_context, model_id, region)
+
+    system_prompt = build_system_prompt(speaker_context, reference_text, speaker_names)
     cleaned = []
     failed_chunks = []
     if cache_dir:
         cache_dir.mkdir(exist_ok=True)
 
-    provider = _detect_llm_provider(model_id)
+    provider = detect_llm_provider(model_id)
     print(f"  LLM cleanup: {len(chunks)} chunks, model: {model_id} (provider: {provider})")
     for i, chunk in enumerate(chunks):
         cache_file = cache_dir / f"chunk_{i:03d}.txt" if cache_dir else None

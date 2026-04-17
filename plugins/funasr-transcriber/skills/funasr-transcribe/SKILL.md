@@ -131,10 +131,10 @@ See `references/pipeline-details.md` for format details and effectiveness data.
 
 ### 4. Run Transcription
 
-Copy the script to the working directory (output files written to CWD):
+Copy the scripts to the working directory (output files written to CWD):
 
 ```bash
-cp ${CLAUDE_PLUGIN_ROOT}/skills/funasr-transcribe/scripts/transcribe_funasr.py .
+cp ${CLAUDE_PLUGIN_ROOT}/skills/funasr-transcribe/scripts/{llm_utils,transcribe_funasr}.py .
 ```
 
 **Prerequisites for Phase 3 (LLM cleanup):** AWS credentials with Bedrock
@@ -178,7 +178,39 @@ python3 transcribe_funasr.py meeting.wav --skip-llm
 python3 transcribe_funasr.py meeting.wav --skip-transcribe
 ```
 
-### 5. Speaker Identification (Post-Processing)
+### 5. Verify Speaker Labels (Post-Processing)
+
+If the transcript has swapped speaker labels (host↔guest, or wrong names
+on meeting participants), use the standalone verification script:
+
+```bash
+cp ${CLAUDE_PLUGIN_ROOT}/skills/funasr-transcribe/scripts/{llm_utils,verify_speakers}.py .
+
+# Podcast: check if host/guest are swapped (dry-run)
+python3 verify_speakers.py podcast_raw_transcript.json \
+    --speakers "孟岩,李继刚" \
+    --speaker-context speaker-context.json
+
+# Apply the fix
+python3 verify_speakers.py podcast_raw_transcript.json \
+    --speakers "孟岩,李继刚" \
+    --speaker-context speaker-context.json --fix
+
+# Multi-speaker meeting: full reassignment
+python3 verify_speakers.py meeting_raw_transcript.json \
+    --speakers "Alice,Bob,Carol,Dave" \
+    --speaker-context speaker-context.json --fix
+
+# Then re-run LLM cleanup with corrected labels
+python3 transcribe_funasr.py original.m4a --skip-transcribe --clean-cache
+```
+
+The script analyzes the first 5 minutes (configurable with `--minutes`)
+using LLM to match content patterns to speaker roles. It auto-detects
+podcast (2 speakers → swap detection) vs meeting (N speakers → full
+reassignment).
+
+### 6. Speaker Diarization Tips
 
 FunASR's CAM++ may merge acoustically similar speakers. To improve:
 
@@ -218,6 +250,8 @@ FunASR's CAM++ may merge acoustically similar speakers. To improve:
   hotword effectiveness data, clustering patch, diarization limitations,
   supporting file preparation guide
 - **`scripts/transcribe_funasr.py`** — Main transcription pipeline
+- **`scripts/verify_speakers.py`** — Standalone speaker label verification & fix
+- **`scripts/llm_utils.py`** — Shared LLM call infrastructure (Bedrock/Anthropic/OpenAI)
 - **`scripts/setup_env.sh`** — Environment setup (venv + deps + patch)
 - **`scripts/patch_clustering.py`** — Sparse eigsh patch for long meetings
 

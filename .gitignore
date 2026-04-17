@@ -36,6 +36,9 @@ CLAUDE.local.md
 *.swo
 .DS_Store
 
+# Git worktrees
+.worktrees/
+
 # Other agent tools
 .agents/
 .kiro/

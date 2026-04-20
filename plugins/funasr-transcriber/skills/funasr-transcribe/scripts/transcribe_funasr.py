@@ -385,7 +385,7 @@ def detect_montage_end(transcript: list, max_scan_ms: int = 180000) -> int:
     followed by a noticeably longer segment (the real show intro). Returns the
     index of the first non-montage segment, or 0 if no montage is detected.
 
-    Heuristic: find the first segment >= 20s within the scan window. If at least
+    Heuristic: find the first segment >= 15s within the scan window. If at least
     3 prior segments exist and most (>= 75%) are short (< 12s), that's a montage.
     """
     if len(transcript) < 4:

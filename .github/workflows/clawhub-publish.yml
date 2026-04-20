@@ -1,0 +1,35 @@
+name: ClawHub Package Publish
+
+on:
+  pull_request:
+    paths:
+      - 'openclaw.plugin.json'
+      - 'plugins/funasr-transcriber/**'
+      - '.github/workflows/clawhub-publish.yml'
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dry-run:
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+    uses: openclaw/clawhub/.github/workflows/package-publish.yml@89246f19272a30d1fd2337c7b1a3838e7e4ddaed # main
+    with:
+      dry_run: true
+
+  publish:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: read
+      id-token: write
+    uses: openclaw/clawhub/.github/workflows/package-publish.yml@89246f19272a30d1fd2337c7b1a3838e7e4ddaed # main
+    with:
+      dry_run: false
+    secrets:
+      clawhub_token: ${{ secrets.CLAWHUB_TOKEN }}

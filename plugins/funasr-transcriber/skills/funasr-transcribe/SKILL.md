@@ -19,6 +19,12 @@ description: >
   Works on both GPU and CPU. Use this skill even when the user doesn't
   say "transcribe" explicitly — e.g., "I have a podcast episode I need
   turned into text" or "convert this interview recording" should trigger it.
+metadata:
+  openclaw:
+    requires:
+      bins: ["python3", "ffmpeg"]
+    emoji: "🎙️"
+    homepage: "https://github.com/zxkane/audio-transcriber-funasr"
 ---
 
 # FunASR Meeting & Podcast Transcription

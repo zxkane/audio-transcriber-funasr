@@ -11,10 +11,15 @@ on:
       - 'v*'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   dry-run:
     if: github.event_name == 'pull_request'
-    uses: openclaw/clawhub/.github/workflows/package-publish.yml@main
+    permissions:
+      contents: read
+    uses: openclaw/clawhub/.github/workflows/package-publish.yml@89246f19272a30d1fd2337c7b1a3838e7e4ddaed # main
     with:
       dry_run: true
 
@@ -23,7 +28,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    uses: openclaw/clawhub/.github/workflows/package-publish.yml@main
+    uses: openclaw/clawhub/.github/workflows/package-publish.yml@89246f19272a30d1fd2337c7b1a3838e7e4ddaed # main
     with:
       dry_run: false
     secrets:

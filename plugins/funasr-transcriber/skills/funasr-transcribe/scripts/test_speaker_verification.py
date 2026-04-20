@@ -451,6 +451,54 @@ class TestTranscribeBuildSpeakerMap:
         assert m == {0: "Speaker 1", 1: "Speaker 2"}
 
 
+class TestDetectMontageEnd:
+    def test_no_montage_few_segments(self):
+        transcript = [make_segment(0, 0, 30000, "long intro")]
+        assert tf.detect_montage_end(transcript) == 0
+
+    def test_no_montage_all_long(self):
+        transcript = [
+            make_segment(0, 0, 20000, "first long"),
+            make_segment(1, 20000, 45000, "second long"),
+        ]
+        assert tf.detect_montage_end(transcript) == 0
+
+    def test_detects_cold_open(self):
+        """Short clips followed by a long segment = montage."""
+        transcript = [
+            make_segment(0, 0, 3000, "clip one"),
+            make_segment(1, 3000, 6000, "clip two"),
+            make_segment(0, 6000, 9000, "clip three"),
+            make_segment(1, 9000, 12000, "clip four"),
+            make_segment(0, 12000, 30000, "welcome to the show, real intro starts"),
+        ]
+        assert tf.detect_montage_end(transcript) == 4
+
+    def test_no_montage_mixed_lengths(self):
+        """One long segment among early ones breaks the montage pattern."""
+        transcript = [
+            make_segment(0, 0, 3000, "short"),
+            make_segment(1, 3000, 20000, "long early on"),
+            make_segment(0, 20000, 23000, "short again"),
+        ]
+        assert tf.detect_montage_end(transcript) == 0
+
+    def test_tulongzhishu_pattern(self):
+        """Simulates the actual 屠龙之术 episode: ~8 short clips then long intro."""
+        transcript = [
+            make_segment(0, 7000, 12000, "大语言模型很像一个发动机"),
+            make_segment(1, 17000, 21000, "技术落地的信号"),
+            make_segment(0, 21000, 27000, "第一波赚钱的肯定是卖课的"),
+            make_segment(0, 28000, 38000, "会不会陷入类似Web3的局面"),
+            make_segment(0, 39000, 47000, "市场永远都是有效的"),
+            make_segment(1, 48000, 50000, "怎么来区分价值股"),
+            make_segment(0, 50000, 53000, "所有都是投机股"),
+            make_segment(0, 55000, 60000, "走向两个问题"),
+            make_segment(1, 62000, 103000, "嗨朋友们好欢迎收听知本论我是冰洁...一大段正式开场"),
+        ]
+        assert tf.detect_montage_end(transcript) == 8
+
+
 class TestVerifySpeakerAssignment:
     def test_detects_chinese_self_intro_mismatch(self):
         transcript = [
@@ -489,6 +537,45 @@ class TestVerifySpeakerAssignment:
         speaker_map = {0: "A", 1: "B"}
         result = tf.verify_speaker_assignment(transcript, speaker_map, ["A", "B"])
         assert result == {0: "A", 1: "B"}
+
+    def test_given_name_match_chinese(self):
+        """'我是冰洁' should match full name '孙冰洁'."""
+        transcript = [
+            make_segment(0, 0, 5000, "嗨，朋友们好，欢迎收听知本论，我是冰洁"),
+            make_segment(1, 5000, 10000, "好，我是屠龙之术的主播庄明浩"),
+        ]
+        speaker_map = {0: "庄明浩", 1: "孙冰洁"}
+        result = tf.verify_speaker_assignment(transcript, speaker_map, ["庄明浩", "孙冰洁"])
+        assert result[0] == "孙冰洁"
+        assert result[1] == "庄明浩"
+
+    def test_filler_between_intro_and_name(self):
+        """'我是屠龙之术的主播庄明浩' should match despite filler words."""
+        transcript = [
+            make_segment(0, 0, 5000, "好，感谢知本论的邀请，我是屠龙之术的主播庄明浩"),
+            make_segment(1, 5000, 10000, "欢迎"),
+        ]
+        speaker_map = {0: "庄明浩", 1: "孙冰洁"}
+        result = tf.verify_speaker_assignment(transcript, speaker_map, ["庄明浩", "孙冰洁"])
+        assert result[0] == "庄明浩"
+
+    def test_two_char_name_given_name_match(self):
+        """Two-char Chinese name: '我是岩' should match '孟岩'."""
+        transcript = [
+            make_segment(0, 0, 5000, "大家好我是岩"),
+            make_segment(1, 5000, 10000, "你好"),
+        ]
+        speaker_map = {0: "李继刚", 1: "孟岩"}
+        result = tf.verify_speaker_assignment(transcript, speaker_map, ["李继刚", "孟岩"])
+        assert result[0] == "孟岩"
+        assert result[1] == "李继刚"
+
+    def test_name_variants_helper(self):
+        """_name_variants produces correct variants."""
+        assert tf._name_variants("孙冰洁") == [("孙冰洁", "孙冰洁"), ("冰洁", "孙冰洁")]
+        assert tf._name_variants("庄明浩") == [("庄明浩", "庄明浩"), ("明浩", "庄明浩")]
+        assert tf._name_variants("Alice") == [("Alice", "Alice")]
+        assert tf._name_variants("孟岩") == [("孟岩", "孟岩"), ("岩", "孟岩")]
 
     def test_no_speaker_names_returns_unchanged(self):
         transcript = [make_segment(0, 0, 5000, "hello")]

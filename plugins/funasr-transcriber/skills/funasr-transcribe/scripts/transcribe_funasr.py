@@ -362,6 +362,52 @@ def build_speaker_map(transcript: list, speakers: Optional[list] = None) -> dict
     return {spk_id: f"Speaker {spk_id + 1}" for spk_id in seen_ids}
 
 
+def _name_variants(name: str) -> list:
+    """Generate matching variants for a speaker name.
+
+    For Chinese names (2-4 chars, all CJK): yields [full_name, given_name].
+    e.g. "孙冰洁" → ["孙冰洁", "冰洁"], "庄明浩" → ["庄明浩", "明浩"].
+    For non-Chinese names: yields [full_name] only.
+    Each variant is returned as (variant, full_name) so matches map back.
+    """
+    result = [(name, name)]
+    if 2 <= len(name) <= 4 and all('\u4e00' <= c <= '\u9fff' for c in name):
+        given = name[1:]
+        if given != name:
+            result.append((given, name))
+    return result
+
+
+def detect_montage_end(transcript: list, max_scan_ms: int = 180000) -> int:
+    """Detect the end of a cold-open montage section.
+
+    Montage = rapid-fire short clips at the start, typically each < 12 seconds,
+    followed by a noticeably longer segment (the real show intro). Returns the
+    index of the first non-montage segment, or 0 if no montage is detected.
+
+    Heuristic: find the first segment >= 20s within the scan window. If at least
+    3 prior segments exist and most (>= 75%) are short (< 12s), that's a montage.
+    """
+    if len(transcript) < 4:
+        return 0
+
+    SHORT_THRESHOLD_MS = 12000
+    LONG_THRESHOLD_MS = 15000
+
+    for i, seg in enumerate(transcript):
+        if seg["start_ms"] > max_scan_ms:
+            break
+        duration = seg["end_ms"] - seg["start_ms"]
+        if i >= 3 and duration >= LONG_THRESHOLD_MS:
+            short_count = sum(
+                1 for j in range(i)
+                if (transcript[j]["end_ms"] - transcript[j]["start_ms"]) < SHORT_THRESHOLD_MS
+            )
+            if short_count / i >= 0.75:
+                return i
+    return 0
+
+
 def verify_speaker_assignment(transcript: list, speaker_map: dict,
                               speaker_names: Optional[list] = None) -> dict:
     """Auto-verify speaker assignment by detecting self-introductions.
@@ -375,15 +421,34 @@ def verify_speaker_assignment(transcript: list, speaker_map: dict,
     if not transcript or not speaker_names or len(speaker_names) < 2:
         return speaker_map
 
-    # Collect segments from first 5 minutes
-    cutoff_ms = transcript[0]["start_ms"] + 5 * 60 * 1000
-    early_segments = [s for s in transcript if s["start_ms"] <= cutoff_ms]
+    # Skip montage/cold-open section — diarization is unreliable there
+    montage_end = detect_montage_end(transcript)
+    if montage_end > 0:
+        print(f"  Montage detected: skipping first {montage_end} segments for self-intro scan")
 
-    # Patterns: "我是X", "我叫X", "I'm X", "I am X", "this is X", "my name is X"
+    # Collect segments from first 5 minutes, starting after montage
+    post_montage = transcript[montage_end:]
+    if not post_montage:
+        return speaker_map
+    cutoff_ms = post_montage[0]["start_ms"] + 5 * 60 * 1000
+    early_segments = [s for s in post_montage if s["start_ms"] <= cutoff_ms]
+
+    # Build name variants: full name + given name for Chinese names
+    all_variants = []
+    for name in speaker_names:
+        all_variants.extend(_name_variants(name))
+
+    # Patterns: allow optional filler between intro phrase and name
+    # "我是冰洁", "我是屠龙之术的主播庄明浩", "I'm Alice", etc.
+    # Double braces {{}} escape Python .format(); single {name} is the placeholder.
     intro_patterns = [
-        r"我是\s*{name}", r"我叫\s*{name}", r"I'?\s*m\s+{name}",
-        r"I\s+am\s+{name}", r"my\s+name\s+is\s+{name}",
-        r"this\s+is\s+{name}", r"大家好.*{name}",
+        r"我是[^。？！\n]{{0,15}}{name}",
+        r"我叫[^。？！\n]{{0,10}}{name}",
+        r"I'?\s*m\s+{name}",
+        r"I\s+am\s+{name}",
+        r"my\s+name\s+is\s+{name}",
+        r"this\s+is\s+{name}",
+        r"大家好[^。？！\n]{{0,20}}{name}",
     ]
 
     # Check each early segment for self-introductions
@@ -392,18 +457,18 @@ def verify_speaker_assignment(transcript: list, speaker_map: dict,
     for seg in early_segments:
         current_label = speaker_map.get(seg["speaker"], "")
         text = seg["text"]
-        for name in speaker_names:
+        for variant, full_name in all_variants:
             for pat_template in intro_patterns:
-                pat = pat_template.format(name=re.escape(name))
+                pat = pat_template.format(name=re.escape(variant))
                 if re.search(pat, text, re.IGNORECASE):
                     entry = {
                         "speaker_id": seg["speaker"],
                         "current_label": current_label,
-                        "actual_name": name,
+                        "actual_name": full_name,
                         "evidence": text[:100],
                         "time_ms": seg["start_ms"],
                     }
-                    if name == current_label:
+                    if full_name == current_label:
                         confirmations.append(entry)
                     else:
                         mismatches.append(entry)
@@ -484,7 +549,17 @@ Rules:
 5. Preserve original meaning — do not add content not in the original
 6. Keep timestamps unchanged
 7. Preserve technical terms and proper nouns
-8. Output cleaned text only, format: [timestamp] Name: content"""
+8. Output cleaned text only, format: [timestamp] Name: content
+9. Detect montage/highlight-reel sections at the start or end of the recording \
+(rapid-fire short clips edited together, each only a few seconds, often previewing \
+topics discussed later). Mark these with a section header: \
+"[片头混剪]" at the start or "[片尾混剪]" at the end, placed on its own line \
+before the first clip in that section.
+10. Within montage sections, speaker diarization is unreliable because clips are \
+spliced from different parts of the recording. Fix speaker labels based on CONTENT: \
+if someone says "我是X" or introduces themselves, that segment belongs to X; \
+if the content clearly matches one speaker's role/expertise, reassign accordingly. \
+Outside montage sections, trust the existing speaker labels."""
 
 
 # ──────────────────────────────────────────────

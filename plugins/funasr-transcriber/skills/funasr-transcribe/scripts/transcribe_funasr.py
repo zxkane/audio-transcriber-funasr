@@ -408,6 +408,108 @@ def detect_montage_end(transcript: list, max_scan_ms: int = 180000) -> int:
     return 0
 
 
+def rescore_montage_speakers(transcript: list, montage_end: int,
+                             audio_path: str, spk_model_id: str,
+                             device: str = "cuda:0",
+                             profile_minutes: int = 5) -> list:
+    """Re-assign speakers in the montage zone using embedding similarity.
+
+    Extracts speaker embeddings via CAM++ for each segment, builds reference
+    profiles from the first N minutes of post-montage content, then re-scores
+    montage segments by cosine similarity to each profile.
+
+    Args:
+        transcript: raw transcript with start_ms/end_ms/speaker per segment
+        montage_end: index of first non-montage segment (from detect_montage_end)
+        audio_path: path to the preprocessed audio file
+        spk_model_id: FunASR speaker model ID (e.g. iic/speech_campplus_sv_zh-cn_16k-common)
+        device: torch device
+        profile_minutes: minutes of post-montage audio to build speaker profiles
+
+    Returns:
+        transcript with montage segment speakers reassigned
+    """
+    if montage_end <= 0 or montage_end >= len(transcript):
+        return transcript
+
+    try:
+        import numpy as np
+        import soundfile as sf
+        from funasr import AutoModel
+    except ImportError as e:
+        print(f"  WARNING: Cannot rescore montage speakers (missing dep: {e})")
+        return transcript
+
+    print(f"  Montage re-scoring: extracting speaker embeddings...")
+
+    spk_model = AutoModel(model=spk_model_id, device=device, disable_update=True)
+
+    audio_data, sample_rate = sf.read(audio_path, dtype="float32")
+    if len(audio_data.shape) > 1:
+        audio_data = audio_data[:, 0]
+
+    def extract_embedding(start_ms: int, end_ms: int):
+        start_sample = int(start_ms * sample_rate / 1000)
+        end_sample = int(end_ms * sample_rate / 1000)
+        segment = audio_data[start_sample:end_sample]
+        if len(segment) < sample_rate * 0.3:
+            return None
+        try:
+            result = spk_model.generate(input=segment)
+            if result and isinstance(result, list) and len(result) > 0:
+                emb = result[0].get("spk_embedding")
+                if emb is not None:
+                    arr = np.array(emb, dtype=np.float32).flatten()
+                    return arr
+        except Exception:
+            pass
+        return None
+
+    post_montage = transcript[montage_end:]
+    profile_cutoff_ms = post_montage[0]["start_ms"] + profile_minutes * 60 * 1000
+    profile_segments = [s for s in post_montage if s["start_ms"] <= profile_cutoff_ms]
+
+    speaker_embeddings = {}
+    for seg in profile_segments:
+        spk = seg["speaker"]
+        emb = extract_embedding(seg["start_ms"], seg["end_ms"])
+        if emb is not None:
+            speaker_embeddings.setdefault(spk, []).append(emb)
+
+    if len(speaker_embeddings) < 2:
+        print(f"  WARNING: Only {len(speaker_embeddings)} speaker profile(s) built, "
+              f"need at least 2. Skipping montage re-scoring.")
+        return transcript
+
+    speaker_profiles = {}
+    for spk, embs in speaker_embeddings.items():
+        profile = np.mean(embs, axis=0)
+        profile /= np.linalg.norm(profile)
+        speaker_profiles[spk] = profile
+        print(f"    Speaker {spk}: profile from {len(embs)} segments")
+
+    def cosine_sim(a, b):
+        return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8))
+
+    changes = 0
+    for i in range(montage_end):
+        seg = transcript[i]
+        emb = extract_embedding(seg["start_ms"], seg["end_ms"])
+        if emb is None:
+            continue
+        scores = {spk: cosine_sim(emb, prof) for spk, prof in speaker_profiles.items()}
+        best_spk = max(scores, key=lambda k: scores[k])
+        if best_spk != seg["speaker"]:
+            old = seg["speaker"]
+            seg["speaker"] = best_spk
+            changes += 1
+            print(f"    [{seg['start_ms']}ms] spk {old} → {best_spk} "
+                  f"(scores: {', '.join(f'{k}={v:.3f}' for k, v in sorted(scores.items()))})")
+
+    print(f"  Montage re-scoring: {changes}/{montage_end} segments reassigned")
+    return transcript
+
+
 def verify_speaker_assignment(transcript: list, speaker_map: dict,
                               speaker_names: Optional[list] = None) -> dict:
     """Auto-verify speaker assignment by detecting self-introductions.
@@ -1001,6 +1103,14 @@ def main():
               f"Use --lang zh or --lang en for better results.")
 
     # ── Phase 2: Post-process ──
+    # Re-score montage speakers using embedding similarity (before merge/mapping)
+    montage_end = detect_montage_end(transcript)
+    if montage_end > 0 and audio_path.exists():
+        preset = MODEL_PRESETS.get(args.lang, MODEL_PRESETS["zh"])
+        transcript = rescore_montage_speakers(
+            transcript, montage_end, asr_audio,
+            preset["spk"], args.device)
+
     merged = merge_consecutive(transcript)
     speaker_map = build_speaker_map(transcript, speaker_names)
     # Auto-verify speaker assignment via self-introductions

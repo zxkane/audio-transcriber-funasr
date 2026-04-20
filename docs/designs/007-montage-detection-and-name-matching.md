@@ -46,8 +46,8 @@ per-segment comparison approach instead of clustering.
 ### Chinese Name Variants (`_name_variants`)
 
 For Chinese names (2-4 CJK characters):
-- Generate `[full_name, given_name]` pairs
-- e.g. "王丽华" → [("王丽华", "王丽华"), ("丽华", "王丽华")]
+- Generate `(variant, full_name)` tuples for matching
+- e.g. "王丽华" → `[("王丽华", "王丽华"), ("丽华", "王丽华")]`
 
 Non-Chinese names pass through unchanged as `[(name, name)]`.
 

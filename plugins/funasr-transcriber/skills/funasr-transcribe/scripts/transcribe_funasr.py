@@ -365,9 +365,9 @@ def build_speaker_map(transcript: list, speakers: Optional[list] = None) -> dict
 def _name_variants(name: str) -> list:
     """Generate matching variants for a speaker name.
 
-    For Chinese names (2-4 chars, all CJK): yields [full_name, given_name].
-    e.g. "孙冰洁" → ["孙冰洁", "冰洁"], "庄明浩" → ["庄明浩", "明浩"].
-    For non-Chinese names: yields [full_name] only.
+    For Chinese names (2-4 chars, all CJK): returns [full_name, given_name].
+    e.g. "孙冰洁" → [("孙冰洁", "孙冰洁"), ("冰洁", "孙冰洁")].
+    For non-Chinese names: returns [full_name] only.
     Each variant is returned as (variant, full_name) so matches map back.
     """
     result = [(name, name)]
@@ -461,8 +461,8 @@ def rescore_montage_speakers(transcript: list, montage_end: int,
                 if emb is not None:
                     arr = np.array(emb, dtype=np.float32).flatten()
                     return arr
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"  WARNING: embedding extraction failed at {start_ms}ms: {e}")
         return None
 
     post_montage = transcript[montage_end:]
@@ -484,7 +484,11 @@ def rescore_montage_speakers(transcript: list, montage_end: int,
     speaker_profiles = {}
     for spk, embs in speaker_embeddings.items():
         profile = np.mean(embs, axis=0)
-        profile /= np.linalg.norm(profile)
+        norm = np.linalg.norm(profile)
+        if norm < 1e-8:
+            print(f"    WARNING: degenerate embedding profile for speaker {spk}, skipping")
+            continue
+        profile /= norm
         speaker_profiles[spk] = profile
         print(f"    Speaker {spk}: profile from {len(embs)} segments")
 

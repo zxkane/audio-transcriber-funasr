@@ -11,8 +11,24 @@ set -euo pipefail
 
 VENV_DIR="${VENV_DIR:-.venv}"
 FORCE_VARIANT="${1:-auto}"
+AUTO_YES="${AUTO_YES:-}"
 
 echo "=== FunASR Environment Setup ==="
+echo ""
+echo "This script will:"
+echo "  - Install ffmpeg (system package) if not present"
+echo "  - Create a Python venv at $VENV_DIR"
+echo "  - Install PyTorch, FunASR, modelscope, boto3 into the venv"
+echo "  - Patch FunASR's clustering for long-audio performance"
+echo ""
+
+if [ -z "$AUTO_YES" ]; then
+    read -rp "Proceed? [y/N] " confirm
+    if [[ ! "$confirm" =~ ^[Yy] ]]; then
+        echo "Aborted."
+        exit 0
+    fi
+fi
 
 # Ensure ffmpeg
 if ! command -v ffmpeg &>/dev/null; then
@@ -69,7 +85,7 @@ pip install -q -U funasr modelscope boto3
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -f "$SCRIPT_DIR/patch_clustering.py" ]; then
     echo "Applying clustering optimization patch..."
-    python3 "$SCRIPT_DIR/patch_clustering.py"
+    python3 "$SCRIPT_DIR/patch_clustering.py" --yes
 fi
 
 echo ""

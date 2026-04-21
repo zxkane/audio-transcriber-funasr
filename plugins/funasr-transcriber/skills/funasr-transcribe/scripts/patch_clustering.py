@@ -10,12 +10,13 @@ which is O(N^2 * k) where k = number of speakers.
 Also vectorizes the p_pruning loop for additional speedup.
 
 Run this AFTER installing funasr, BEFORE transcribing long audio:
-  python3 patch_clustering.py
+  python3 patch_clustering.py        # interactive (prompts before patching)
+  python3 patch_clustering.py --yes  # non-interactive (e.g. from setup_env.sh)
 
 The patch is idempotent — safe to run multiple times.
 """
 
-import importlib
+import argparse
 import site
 import sys
 from pathlib import Path
@@ -100,12 +101,27 @@ def patch_file(path: Path) -> bool:
 
 
 def main():
+    parser = argparse.ArgumentParser(
+        description="Patch FunASR's spectral clustering for sparse eigenvalue decomposition.")
+    parser.add_argument("-y", "--yes", action="store_true",
+                        help="Skip confirmation prompt")
+    args = parser.parse_args()
+
     target = find_cluster_backend()
     if target is None:
         print("Error: funasr not installed or cluster_backend.py not found")
         sys.exit(1)
 
     print(f"Found: {target}")
+
+    if not args.yes:
+        print(f"\nThis will modify the installed FunASR package file:\n  {target}")
+        print("The patch replaces O(N³) eigenvalue decomposition with O(N²·k) for large matrices.")
+        resp = input("Proceed? [y/N] ").strip().lower()
+        if resp not in ("y", "yes"):
+            print("Aborted.")
+            sys.exit(0)
+
     patch_file(target)
     print("Done.")
 

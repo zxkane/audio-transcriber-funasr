@@ -28,6 +28,7 @@ CLAUDE.local.md
 .env
 .env.*
 .claude/settings.local.json
+.claude/scheduled_tasks.lock
 
 # IDE
 .vscode/

@@ -23,6 +23,10 @@ jobs:
       - id: read
         run: |
           version=$(grep '^version:' plugins/funasr-transcriber/skills/funasr-transcribe/SKILL.md | head -1 | awk '{print $2}')
+          if [ -z "$version" ]; then
+            echo "Error: Could not extract version from SKILL.md" >&2
+            exit 1
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
   validate:

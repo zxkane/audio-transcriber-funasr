@@ -132,10 +132,10 @@ def main():
             resp = input("Proceed? [y/N] ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             print("\nAborted (non-interactive or interrupted).")
-            sys.exit(1)
+            sys.exit(2)
         if resp not in ("y", "yes"):
             print("Aborted.")
-            sys.exit(0)
+            sys.exit(2)
 
     patch_file(target)
     print("Done.")

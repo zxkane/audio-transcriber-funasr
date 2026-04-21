@@ -24,18 +24,9 @@ metadata:
     requires:
       bins: ["python3", "ffmpeg"]
     env_vars:
-      - name: AWS_ACCESS_KEY_ID
-        required: false
-        description: "AWS credentials for Bedrock LLM cleanup (Phase 3)"
-      - name: AWS_SECRET_ACCESS_KEY
-        required: false
-        description: "AWS credentials for Bedrock LLM cleanup (Phase 3)"
-      - name: AWS_SESSION_TOKEN
-        required: false
-        description: "AWS session token for temporary credentials"
       - name: AWS_REGION
         required: false
-        description: "AWS region for Bedrock (default: us-west-2)"
+        description: "AWS region for Bedrock LLM cleanup (default: us-west-2). Bedrock uses the standard AWS credential chain (IAM role, SSO, ~/.aws/credentials, env vars) — no explicit keys needed."
       - name: ANTHROPIC_API_KEY
         required: false
         description: "API key for Anthropic Claude LLM cleanup"

@@ -111,3 +111,8 @@ print(f'FunASR {funasr.__version__}')
 "
 echo ""
 echo "Activate with: source $VENV_DIR/bin/activate"
+echo ""
+echo "Optional LLM provider SDKs (for Phase 3 cleanup):"
+echo "  pip install anthropic   # for --model claude-*"
+echo "  pip install openai      # for --model gpt-* / deepseek-* / vLLM / Ollama"
+echo "  (boto3 is already installed for AWS Bedrock, the default provider)"

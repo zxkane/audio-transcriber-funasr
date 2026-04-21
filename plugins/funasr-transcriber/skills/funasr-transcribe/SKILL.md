@@ -1,6 +1,6 @@
 ---
 name: funasr-transcribe
-version: 1.3.1
+version: 1.4.0
 description: >
   This skill should be used when the user explicitly asks to "transcribe a meeting",
   "transcribe audio", "transcribe a meeting recording",

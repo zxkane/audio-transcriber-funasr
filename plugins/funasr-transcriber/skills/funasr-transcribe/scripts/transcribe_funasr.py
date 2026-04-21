@@ -1039,6 +1039,12 @@ def main():
     raw_json = Path(args.json_out) if args.json_out else Path(f"{audio_path.stem}_raw_transcript.json")
     output_path = Path(args.output) if args.output else Path(f"{audio_path.stem}-transcript.md")
 
+    if args.json_out:
+        parent = raw_json.parent or Path(".")
+        if not parent.exists():
+            print(f"Error: --json-out directory does not exist: {parent}")
+            sys.exit(1)
+
     # Auto-detect device
     if args.device is None:
         try:

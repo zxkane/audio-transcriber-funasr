@@ -1174,6 +1174,64 @@ class TestPhase1Flags:
         content = output_md.read_text()
         assert "Transcript" in content
 
+    def test_json_out_nonexistent_parent_exits(self, tmp_path):
+        """--json-out to a nonexistent directory exits with code 1."""
+        bad_path = tmp_path / "nonexistent" / "dir" / "out.json"
+        test_args = [
+            "transcribe_funasr.py",
+            str(tmp_path / "test.wav"),
+            "--json-out", str(bad_path),
+            "--device", "cpu",
+        ]
+        with patch("sys.argv", test_args):
+            with pytest.raises(SystemExit) as exc_info:
+                tf.main()
+            assert exc_info.value.code == 1
+
+    def test_phase1_only_empty_transcript_exits_error(self, tmp_path):
+        """--phase1-only with empty transcript exits with error, not success."""
+        raw_json = tmp_path / "empty_raw_transcript.json"
+        with open(raw_json, "w") as f:
+            json.dump([], f)
+        test_args = [
+            "transcribe_funasr.py",
+            str(tmp_path / "test.wav"),
+            "--phase1-only",
+            "--skip-transcribe",
+            "--json-out", str(raw_json),
+            "--device", "cpu",
+        ]
+        with patch("sys.argv", test_args):
+            with pytest.raises(SystemExit) as exc_info:
+                tf.main()
+            assert exc_info.value.code == 1
+
+    def test_phase1_only_writes_json_then_exits(self, tmp_path):
+        """--phase1-only writes raw JSON and exits 0 without --skip-transcribe."""
+        transcript = [
+            make_segment(0, 0, 5000, "Hello"),
+            make_segment(1, 5000, 10000, "World"),
+        ]
+        custom_json = tmp_path / "phase1_out.json"
+        with patch("sys.argv", [
+                "transcribe_funasr.py", str(tmp_path / "test.wav"),
+                "--phase1-only",
+                "--json-out", str(custom_json),
+                "--device", "cpu",
+            ]), \
+             patch.object(tf, "transcribe_with_funasr", return_value=transcript), \
+             patch.object(tf, "preprocess_audio", return_value=str(tmp_path / "test.wav")), \
+             patch("pathlib.Path.exists", return_value=True):
+            with pytest.raises(SystemExit) as exc_info:
+                tf.main()
+            assert exc_info.value.code == 0
+        assert custom_json.exists()
+        saved = json.loads(custom_json.read_text())
+        assert len(saved) == 2
+        assert saved[0]["text"] == "Hello"
+        md_path = tmp_path / "test-transcript.md"
+        assert not md_path.exists()
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

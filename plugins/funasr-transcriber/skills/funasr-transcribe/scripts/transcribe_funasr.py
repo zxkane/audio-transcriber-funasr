@@ -1004,6 +1004,12 @@ def main():
                    help="JSON file with per-speaker context to help LLM identify speakers")
     p.add_argument("--title", type=str, default="Meeting Transcript",
                    help="Title for the output document (default: 'Meeting Transcript')")
+    p.add_argument("--phase1-only", action="store_true",
+                   help="Exit after Phase 1 (VAD + ASR + diarization). "
+                        "Skips speaker verification and LLM cleanup.")
+    p.add_argument("--json-out", type=str, default=None, metavar="PATH",
+                   help="Write Phase 1 raw transcript JSON to this path "
+                        "(overrides default <stem>_raw_transcript.json naming)")
     p.add_argument("--skip-transcribe", action="store_true",
                    help="Skip ASR, load from *_raw_transcript.json")
     p.add_argument("--skip-llm", action="store_true", help="Skip LLM cleanup")
@@ -1030,8 +1036,14 @@ def main():
         print(f"  Model cache: {args.model_cache_dir}")
 
     audio_path = Path(args.audio_file)
-    raw_json = Path(f"{audio_path.stem}_raw_transcript.json")
+    raw_json = Path(args.json_out) if args.json_out else Path(f"{audio_path.stem}_raw_transcript.json")
     output_path = Path(args.output) if args.output else Path(f"{audio_path.stem}-transcript.md")
+
+    if args.json_out:
+        parent = raw_json.parent or Path(".")
+        if not parent.exists():
+            print(f"Error: --json-out directory does not exist: {parent}")
+            sys.exit(1)
 
     # Auto-detect device
     if args.device is None:
@@ -1099,6 +1111,10 @@ def main():
     if not transcript:
         print("Error: empty transcript")
         sys.exit(1)
+
+    if args.phase1_only:
+        print(f"--phase1-only: stopping after Phase 1 ({len(transcript)} sentences)")
+        sys.exit(0)
 
     # Runtime check: warn if most segments lack timestamps (diarization degraded)
     no_ts = sum(1 for s in transcript if s["start_ms"] == 0 and s["end_ms"] == 0)

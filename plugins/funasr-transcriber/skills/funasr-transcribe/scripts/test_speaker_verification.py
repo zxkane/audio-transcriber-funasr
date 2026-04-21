@@ -1043,5 +1043,195 @@ class TestVerifySpeakersMain:
         assert exc_info.value.code == 1
 
 
+# ──────────────────────────────────────────────
+# Phase1-only and json-out flag tests
+# ──────────────────────────────────────────────
+
+class TestPhase1Flags:
+    """Tests for --phase1-only and --json-out CLI flags."""
+
+    def _parse(self, extra_args):
+        """Parse CLI args with defaults suitable for testing."""
+        base = ["test.wav"]
+        with patch("sys.argv", ["transcribe_funasr.py"] + base + extra_args):
+            p = argparse.ArgumentParser()
+            p.add_argument("audio_file")
+            p.add_argument("--phase1-only", action="store_true")
+            p.add_argument("--json-out", type=str, default=None)
+            p.add_argument("--skip-transcribe", action="store_true")
+            p.add_argument("--skip-llm", action="store_true")
+            p.add_argument("--model", default=None)
+            p.add_argument("--output", default=None)
+            return p.parse_args(base + extra_args)
+
+    def test_phase1_only_flag_parsed(self):
+        args = self._parse(["--phase1-only"])
+        assert args.phase1_only is True
+
+    def test_phase1_only_default_false(self):
+        args = self._parse([])
+        assert args.phase1_only is False
+
+    def test_json_out_flag_parsed(self):
+        args = self._parse(["--json-out", "/tmp/out.json"])
+        assert args.json_out == "/tmp/out.json"
+
+    def test_json_out_default_none(self):
+        args = self._parse([])
+        assert args.json_out is None
+
+    def test_json_out_overrides_default_path(self):
+        from pathlib import Path
+        args = self._parse(["--json-out", "/tmp/custom.json"])
+        raw_json = Path(args.json_out) if args.json_out else Path(f"{Path(args.audio_file).stem}_raw_transcript.json")
+        assert raw_json == Path("/tmp/custom.json")
+
+    def test_default_raw_json_path(self):
+        from pathlib import Path
+        args = self._parse([])
+        raw_json = Path(args.json_out) if args.json_out else Path(f"{Path(args.audio_file).stem}_raw_transcript.json")
+        assert raw_json == Path("test_raw_transcript.json")
+
+    def test_phase1_only_with_json_out(self):
+        args = self._parse(["--phase1-only", "--json-out", "/tmp/out.json"])
+        assert args.phase1_only is True
+        assert args.json_out == "/tmp/out.json"
+
+    def test_phase1_only_early_exit(self, tmp_path):
+        """--phase1-only exits after Phase 1 without producing .md output."""
+        transcript = [
+            make_segment(0, 0, 5000, "Hello world"),
+            make_segment(1, 5000, 10000, "Hi there"),
+        ]
+        raw_json = tmp_path / "test_raw_transcript.json"
+        with open(raw_json, "w") as f:
+            json.dump(transcript, f)
+
+        md_path = tmp_path / "test-transcript.md"
+        test_args = [
+            "transcribe_funasr.py",
+            str(tmp_path / "test.wav"),
+            "--phase1-only",
+            "--skip-transcribe",
+            "--json-out", str(raw_json),
+            "--device", "cpu",
+        ]
+        with patch("sys.argv", test_args), \
+             patch.object(sys, "exit") as mock_exit:
+            mock_exit.side_effect = SystemExit(0)
+            with pytest.raises(SystemExit) as exc_info:
+                tf.main()
+            assert exc_info.value.code == 0
+        assert not md_path.exists()
+
+    def test_json_out_writes_to_custom_path(self, tmp_path):
+        """--json-out writes transcript JSON to the specified path."""
+        custom_json = tmp_path / "custom_output.json"
+        transcript = [
+            make_segment(0, 0, 5000, "Hello"),
+            make_segment(1, 5000, 10000, "World"),
+        ]
+        with patch("sys.argv", [
+                "transcribe_funasr.py", str(tmp_path / "test.wav"),
+                "--json-out", str(custom_json),
+                "--skip-llm", "--device", "cpu",
+            ]), \
+             patch.object(tf, "transcribe_with_funasr", return_value=transcript), \
+             patch.object(tf, "preprocess_audio", return_value=str(tmp_path / "test.wav")), \
+             patch.object(tf, "detect_montage_end", return_value=0), \
+             patch("pathlib.Path.exists", return_value=True):
+            tf.main()
+        assert custom_json.exists()
+        saved = json.loads(custom_json.read_text())
+        assert len(saved) == 2
+        assert saved[0]["text"] == "Hello"
+
+    def test_without_new_flags_runs_all_phases(self, tmp_path):
+        """Without new flags, all phases run (backward compatibility)."""
+        transcript = [
+            make_segment(0, 0, 5000, "Hello"),
+            make_segment(1, 5000, 10000, "World"),
+        ]
+        output_md = tmp_path / "test-transcript.md"
+        raw_json = tmp_path / "test_raw_transcript.json"
+
+        def fake_exists(self_path=None):
+            return True
+
+        with patch("sys.argv", [
+                "transcribe_funasr.py", str(tmp_path / "test.wav"),
+                "--skip-llm", "--device", "cpu",
+                "--output", str(output_md),
+                "--json-out", str(raw_json),
+            ]), \
+             patch.object(tf, "transcribe_with_funasr", return_value=transcript), \
+             patch.object(tf, "preprocess_audio", return_value=str(tmp_path / "test.wav")), \
+             patch.object(tf, "detect_montage_end", return_value=0), \
+             patch("pathlib.Path.exists", return_value=True):
+            tf.main()
+        assert output_md.exists()
+        assert raw_json.exists()
+        content = output_md.read_text()
+        assert "Transcript" in content
+
+    def test_json_out_nonexistent_parent_exits(self, tmp_path):
+        """--json-out to a nonexistent directory exits with code 1."""
+        bad_path = tmp_path / "nonexistent" / "dir" / "out.json"
+        test_args = [
+            "transcribe_funasr.py",
+            str(tmp_path / "test.wav"),
+            "--json-out", str(bad_path),
+            "--device", "cpu",
+        ]
+        with patch("sys.argv", test_args):
+            with pytest.raises(SystemExit) as exc_info:
+                tf.main()
+            assert exc_info.value.code == 1
+
+    def test_phase1_only_empty_transcript_exits_error(self, tmp_path):
+        """--phase1-only with empty transcript exits with error, not success."""
+        raw_json = tmp_path / "empty_raw_transcript.json"
+        with open(raw_json, "w") as f:
+            json.dump([], f)
+        test_args = [
+            "transcribe_funasr.py",
+            str(tmp_path / "test.wav"),
+            "--phase1-only",
+            "--skip-transcribe",
+            "--json-out", str(raw_json),
+            "--device", "cpu",
+        ]
+        with patch("sys.argv", test_args):
+            with pytest.raises(SystemExit) as exc_info:
+                tf.main()
+            assert exc_info.value.code == 1
+
+    def test_phase1_only_writes_json_then_exits(self, tmp_path):
+        """--phase1-only writes raw JSON and exits 0 without --skip-transcribe."""
+        transcript = [
+            make_segment(0, 0, 5000, "Hello"),
+            make_segment(1, 5000, 10000, "World"),
+        ]
+        custom_json = tmp_path / "phase1_out.json"
+        with patch("sys.argv", [
+                "transcribe_funasr.py", str(tmp_path / "test.wav"),
+                "--phase1-only",
+                "--json-out", str(custom_json),
+                "--device", "cpu",
+            ]), \
+             patch.object(tf, "transcribe_with_funasr", return_value=transcript), \
+             patch.object(tf, "preprocess_audio", return_value=str(tmp_path / "test.wav")), \
+             patch("pathlib.Path.exists", return_value=True):
+            with pytest.raises(SystemExit) as exc_info:
+                tf.main()
+            assert exc_info.value.code == 0
+        assert custom_json.exists()
+        saved = json.loads(custom_json.read_text())
+        assert len(saved) == 2
+        assert saved[0]["text"] == "Hello"
+        md_path = tmp_path / "test-transcript.md"
+        assert not md_path.exists()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

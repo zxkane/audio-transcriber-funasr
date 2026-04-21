@@ -224,6 +224,8 @@ validates that no audio is lost (detects silent truncation).
 | `--audio-format` | `flac` (default), `opus`, `wav` |
 | `--device cpu` | Force CPU mode |
 | `--batch-size N` | Adjust for memory (60 for CPU, 100 if GPU OOM) |
+| `--phase1-only` | Exit after Phase 1 (VAD + ASR + diarization), skip Phase 2 + 3 |
+| `--json-out PATH` | Write raw transcript JSON to explicit path (overrides default naming) |
 | `--skip-transcribe` | Resume from saved `*_raw_transcript.json` |
 | `--skip-llm` | Skip LLM cleanup (default when `--model` is omitted) |
 | `--model ID` | Enable LLM cleanup with this model (auto-detects Bedrock/Anthropic/OpenAI) |

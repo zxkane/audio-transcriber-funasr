@@ -2,7 +2,7 @@
 name: funasr-transcribe
 version: 1.3.1
 description: >
-  This skill should be used when the user asks to "transcribe a meeting",
+  This skill should be used when the user explicitly asks to "transcribe a meeting",
   "transcribe audio", "transcribe a meeting recording",
   "convert audio to text", "generate meeting minutes from audio",
   "do speech-to-text", "transcribe with speaker diarization",
@@ -16,9 +16,7 @@ description: >
   Supports multi-speaker meeting and podcast transcription in Chinese,
   English, Japanese, Korean, Cantonese, and 99 languages (via Whisper)
   with automatic speaker diarization and hotword biasing.
-  Works on both GPU and CPU. Use this skill even when the user doesn't
-  say "transcribe" explicitly — e.g., "I have a podcast episode I need
-  turned into text" or "convert this interview recording" should trigger it.
+  Works on both GPU and CPU.
 metadata:
   openclaw:
     requires:
@@ -111,17 +109,21 @@ Without this, recordings over ~1 hour hang for hours during speaker clustering.
 
 Output files are written to the current working directory.
 
-**Prerequisites for LLM cleanup (Phase 3):** AWS credentials with Bedrock
-`InvokeModel` permission. Skip with `--skip-llm` if unavailable.
+**LLM cleanup (Phase 3) is opt-in.** By default, transcription runs locally
+without contacting any external service. To enable LLM-powered ASR correction
+and speaker name refinement, pass `--model <model-id>`. Use LLM cleanup when:
+- The raw transcript has many ASR errors (names, technical terms)
+- You need polished, publication-ready output
+- Speaker names need to be refined from context
 
-> **⚠️ Data Privacy:** When LLM cleanup is enabled (the default), transcript
+> **⚠️ Data Privacy:** When LLM cleanup is enabled via `--model`, transcript
 > excerpts are sent to external LLM providers (AWS Bedrock, Anthropic, or
-> OpenAI depending on `--model`). Use `--skip-llm` to keep all data local.
-> Only the credentials you configure will be used — no auto-discovery of
-> unrelated credentials occurs.
+> OpenAI depending on the model ID). Use `--skip-llm` or omit `--model` to
+> keep all data local. For Bedrock, boto3 uses the standard AWS credential
+> chain (IAM role, SSO, `~/.aws/credentials`, env vars).
 
 ```bash
-# Chinese meeting with hotwords (recommended)
+# Chinese meeting with hotwords (local-only, no LLM)
 python3 $SCRIPTS/transcribe_funasr.py meeting.wav \
     --lang zh --num-speakers 9 --hotwords hotwords.txt
 
@@ -137,27 +139,32 @@ python3 $SCRIPTS/transcribe_funasr.py meeting.wav \
 python3 $SCRIPTS/transcribe_funasr.py meeting.wav \
     --lang whisper --num-speakers 4
 
-# Full pipeline with all supporting files (best quality)
+# Enable LLM cleanup for polished output (requires --model)
+# Bedrock (uses AWS credential chain: IAM role, SSO, ~/.aws/credentials)
+python3 $SCRIPTS/transcribe_funasr.py meeting.wav \
+    --lang zh --num-speakers 9 --hotwords hotwords.txt \
+    --model us.anthropic.claude-sonnet-4-6
+
+# Anthropic API (requires ANTHROPIC_API_KEY env var)
+python3 $SCRIPTS/transcribe_funasr.py meeting.wav \
+    --model claude-sonnet-4-6
+
+# OpenAI-compatible API (requires OPENAI_API_KEY env var)
+python3 $SCRIPTS/transcribe_funasr.py meeting.wav \
+    --model gpt-4o
+
+# Full pipeline with all supporting files + LLM (best quality)
 python3 $SCRIPTS/transcribe_funasr.py episode.m4a \
     --lang zh --num-speakers 2 \
     --hotwords hotwords.txt \
     --speakers "关羽,张飞" \
     --speaker-context speaker-context.json \
-    --reference show-notes.md
-
-# Different LLM providers (auto-detected from model ID)
-python3 $SCRIPTS/transcribe_funasr.py meeting.wav \
-    --model claude-sonnet-4-6                    # Anthropic API
-python3 $SCRIPTS/transcribe_funasr.py meeting.wav \
-    --model us.anthropic.claude-sonnet-4-6       # Bedrock
-python3 $SCRIPTS/transcribe_funasr.py meeting.wav \
-    --model gpt-4o                               # OpenAI-compatible
-
-# Raw transcription only (no LLM cleanup)
-python3 $SCRIPTS/transcribe_funasr.py meeting.wav --skip-llm
+    --reference show-notes.md \
+    --model us.anthropic.claude-sonnet-4-6
 
 # Resume interrupted LLM cleanup
-python3 $SCRIPTS/transcribe_funasr.py meeting.wav --skip-transcribe
+python3 $SCRIPTS/transcribe_funasr.py meeting.wav \
+    --skip-transcribe --model us.anthropic.claude-sonnet-4-6
 ```
 
 ### 3. Verify Speaker Labels
@@ -218,8 +225,8 @@ validates that no audio is lost (detects silent truncation).
 | `--device cpu` | Force CPU mode |
 | `--batch-size N` | Adjust for memory (60 for CPU, 100 if GPU OOM) |
 | `--skip-transcribe` | Resume from saved `*_raw_transcript.json` |
-| `--skip-llm` | Skip LLM cleanup |
-| `--model ID` | LLM model (auto-detects Bedrock/Anthropic/OpenAI) |
+| `--skip-llm` | Skip LLM cleanup (default when `--model` is omitted) |
+| `--model ID` | Enable LLM cleanup with this model (auto-detects Bedrock/Anthropic/OpenAI) |
 | `--title "..."` | Output document title |
 | `--clean-cache` | Delete LLM chunk cache after completion |
 | `--output PATH` | Custom output file path |

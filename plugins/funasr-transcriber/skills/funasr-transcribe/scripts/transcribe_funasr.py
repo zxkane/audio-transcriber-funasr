@@ -5,7 +5,7 @@ Four-phase pipeline optimized for multi-speaker meetings:
   Phase 0: Audio preprocessing (ffmpeg conversion + duration validation)
   Phase 1: FunASR ASR + speaker diarization (+ optional hotword biasing)
   Phase 2: Post-processing (merge, speaker mapping, auto-verify via self-intro)
-  Phase 3: LLM cleanup via Bedrock/Anthropic/OpenAI (optional)
+  Phase 3: LLM cleanup via Bedrock/Anthropic/OpenAI (opt-in, requires --model)
 
 Language presets:
   zh        — SeACo-Paraformer (best Chinese, CER 1.95%, hotword support)
@@ -992,9 +992,8 @@ def main():
                         "flac is lossless and avoids truncation issues with opus on long audio.")
     p.add_argument("--output", default=None,
                    help="Output file (default: <stem>-transcript.md)")
-    _default_model = "us.anthropic.claude-sonnet-4-6"
     p.add_argument("--model", default=None,
-                   help=f"LLM model ID for cleanup (default: {_default_model}). "
+                   help="LLM model ID for cleanup (omit to skip LLM cleanup). "
                         "Auto-detects provider: "
                         "Bedrock ARN/cross-region ID → Bedrock converse API, "
                         "claude-* → Anthropic Messages API, "
@@ -1019,9 +1018,11 @@ def main():
     p.add_argument("--bedrock-model", type=str, default=None,
                    help=argparse.SUPPRESS)  # Deprecated, use --model
     args = p.parse_args()
-    # Resolve model: --model wins, then --bedrock-model, then default
+    # Resolve model: --model wins, then --bedrock-model, then skip LLM
     if args.model is None:
-        args.model = args.bedrock_model or _default_model
+        args.model = args.bedrock_model
+    if args.model is None:
+        args.skip_llm = True
 
     # Set model cache dir before any FunASR import
     if args.model_cache_dir:

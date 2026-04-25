@@ -87,8 +87,17 @@ Before starting transcription, **always ask the user**:
   host + guest names, suggest `--speaker-context` for roles
   (do NOT use `--lang auto` — it lacks timestamps for speaker diarization)
 
+> **⚠️ `--speakers` must use the speaker's real name, not a podcast alias.**
+> The value passed to `--speakers` is used verbatim as the speaker label in the
+> output transcript. Always derive it from the host/guest's actual name (e.g.
+> from a shownotes "Host:" field), not from the podcast feed name or title.
+>
+> Example: if shownotes lists "Host: 张三（张三的播客）", pass `--speakers '张三'`
+> — not the alias "张三的播客". Add both the real name and the alias to
+> `hotwords.txt` so ASR can recognise both forms.
+
 If the user provides supporting materials:
-- Extract participant names and key terms → create `hotwords.txt`
+- Extract participant names and key terms → create `hotwords.txt` (include both real name and alias)
 - Extract per-person context → create `speaker-context.json`
 - Pass original reference document with `--reference`
 - Use all three together for best results

@@ -1209,7 +1209,7 @@ def main():
         chunks = chunk_by_duration(merged)
         cleaned_parts = [format_chunk(chunk, speaker_map) for chunk in chunks]
     else:
-        cache_dir = Path(f"{audio_path.stem}_llm_cache")
+        cache_dir = audio_path.parent / f"{audio_path.stem}_llm_cache"
         print("[Phase 3] LLM cleanup...")
         cleaned_parts = run_llm_cleanup(merged, speaker_map, args.model,
                                         args.bedrock_region, speaker_context,

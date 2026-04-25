@@ -95,6 +95,12 @@ Before starting transcription, **always ask the user**:
 > Example: if shownotes lists "Host: 张三（张三的播客）", pass `--speakers '张三'`
 > — not the alias "张三的播客". Add both the real name and the alias to
 > `hotwords.txt` so ASR can recognise both forms.
+>
+> When both `--speakers` and `--reference` are supplied, the script detects
+> this mistake at startup and prints an `ACTION REQUIRED` block naming the
+> suggested real name. **If you see that block, stop the run and re-invoke
+> with the corrected `--speakers` value before Phase 3** — the warning does
+> not abort the pipeline.
 
 If the user provides supporting materials:
 - Extract participant names and key terms → create `hotwords.txt` (include both real name and alias)

@@ -387,6 +387,54 @@ def extract_speaker_names_from_reference(reference_text: Optional[str]) -> list:
     return ordered
 
 
+def detect_alias_in_speakers(speaker_names: list,
+                             reference_text: Optional[str]) -> list:
+    """Detect when --speakers values look like aliases, not real names.
+
+    Show notes commonly use "Host: 张三（张三的播客）" — real name with a
+    parenthetical alias. If the user passes --speakers '张三的播客' (the alias)
+    it becomes the output label, which is almost always a mistake. Scan the
+    reference for "real_name(alias)" pairs and flag any user-supplied name
+    that matches an alias but not a real name.
+
+    Returns a list of (supplied_name, suggested_real_name) tuples for each
+    mismatch. Empty if everything looks fine or reference has no alias pairs.
+    """
+    if not speaker_names or not reference_text:
+        return []
+
+    # Match "real_name（alias）" or "real_name(alias)" after Host/Guest/主播/嘉宾 labels.
+    # Uses the same name_re as extract_speaker_names_from_reference for real name;
+    # alias class is looser (allow spaces) since aliases can be multi-word.
+    name_re = r"[\w一-鿿·\-]{1,30}"
+    alias_re = r"[\w一-鿿·\- ]{1,40}"
+    pair_patterns = [
+        r"(?:主播|主持[人员]?|Host|嘉宾|Guest)\s*[:：\-—–]\s*("
+        + name_re + r")\s*[（(]\s*(" + alias_re + r")\s*[)）]",
+    ]
+    pairs = []
+    for pat in pair_patterns:
+        for m in re.finditer(pat, reference_text, re.IGNORECASE):
+            real = m.group(1).strip()
+            alias = m.group(2).strip()
+            if real and alias and real != alias:
+                pairs.append((real, alias))
+
+    if not pairs:
+        return []
+
+    mismatches = []
+    real_names = {real for real, _ in pairs}
+    for supplied in speaker_names:
+        if supplied in real_names:
+            continue  # user picked the real name — good
+        for real, alias in pairs:
+            if supplied == alias:
+                mismatches.append((supplied, real))
+                break
+    return mismatches
+
+
 def build_speaker_map(transcript: list, speakers: Optional[list] = None) -> dict:
     """Build speaker ID -> display name mapping.
 
@@ -1126,6 +1174,23 @@ def main():
             print(f"  Reference loaded: {ref_path} ({len(reference_text)} chars)")
         else:
             print(f"  Warning: --reference file not found: {args.reference}")
+
+    # Alias check: when both --speakers and --reference are supplied, warn
+    # loudly if a user-supplied name matches a parenthetical alias in the
+    # reference instead of the real name. Does NOT modify speaker_names —
+    # the user's explicit choice still wins — but prints an ACTION REQUIRED
+    # block the operator must notice before shipping the transcript.
+    if speaker_names and reference_text:
+        mismatches = detect_alias_in_speakers(speaker_names, reference_text)
+        if mismatches:
+            print("\n" + "=" * 60)
+            print("  ACTION REQUIRED: --speakers looks like an alias")
+            print("=" * 60)
+            for supplied, real in mismatches:
+                print(f"  '{supplied}' appears in reference as an alias of '{real}'.")
+                print(f"  Labels in the output transcript will use '{supplied}'.")
+                print(f"  If you meant the real name, re-run with --speakers '{real}'.")
+            print("=" * 60 + "\n")
 
     # Fallback: if --speakers not provided but reference has role labels
     # (主播/嘉宾/Host/Guest), use those so the final output shows real names

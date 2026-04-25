@@ -512,6 +512,55 @@ class TestExtractSpeakerNamesFromReference:
         assert tf.extract_speaker_names_from_reference(text) == ["Alice"]
 
 
+class TestDetectAliasInSpeakers:
+    def test_alias_detected_chinese(self):
+        ref = "主播：张三（张三的播客）"
+        result = tf.detect_alias_in_speakers(["张三的播客"], ref)
+        assert result == [("张三的播客", "张三")]
+
+    def test_real_name_accepted(self):
+        ref = "主播：张三（张三的播客）"
+        assert tf.detect_alias_in_speakers(["张三"], ref) == []
+
+    def test_english_alias_detected(self):
+        ref = "Host: Alice (AlicePodcast)"
+        result = tf.detect_alias_in_speakers(["AlicePodcast"], ref)
+        assert result == [("AlicePodcast", "Alice")]
+
+    def test_ascii_parens_detected(self):
+        ref = "Host: 张三(张三的播客)\n嘉宾: 李四"
+        result = tf.detect_alias_in_speakers(["张三的播客", "李四"], ref)
+        assert result == [("张三的播客", "张三")]
+
+    def test_no_parens_in_reference(self):
+        ref = "主播：张三\n嘉宾：李四"
+        assert tf.detect_alias_in_speakers(["张三"], ref) == []
+
+    def test_multiple_mismatches(self):
+        ref = "主播：张三（张三的播客）\n嘉宾：李四（四哥）"
+        result = tf.detect_alias_in_speakers(["张三的播客", "四哥"], ref)
+        assert ("张三的播客", "张三") in result
+        assert ("四哥", "李四") in result
+
+    def test_partial_mismatch(self):
+        ref = "主播：张三（张三的播客）\n嘉宾：李四"
+        result = tf.detect_alias_in_speakers(["张三的播客", "李四"], ref)
+        assert result == [("张三的播客", "张三")]
+
+    def test_unknown_name_not_flagged(self):
+        ref = "主播：张三（张三的播客）"
+        assert tf.detect_alias_in_speakers(["王五"], ref) == []
+
+    def test_empty_inputs(self):
+        assert tf.detect_alias_in_speakers([], "主播：张三（张三的播客）") == []
+        assert tf.detect_alias_in_speakers(["张三"], None) == []
+        assert tf.detect_alias_in_speakers(["张三"], "") == []
+
+    def test_reference_without_role_label(self):
+        ref = "张三（张三的播客）是一位资深投资人"
+        assert tf.detect_alias_in_speakers(["张三的播客"], ref) == []
+
+
 class TestDetectMontageEnd:
     def test_no_montage_few_segments(self):
         transcript = [make_segment(0, 0, 30000, "long intro")]

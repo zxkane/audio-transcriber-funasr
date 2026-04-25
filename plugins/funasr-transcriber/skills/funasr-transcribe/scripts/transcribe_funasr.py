@@ -355,7 +355,7 @@ def extract_speaker_names_from_reference(reference_text: Optional[str]) -> list:
     """Best-effort extraction of speaker names from show notes / reference text.
 
     Recognizes common Chinese/English podcast role labels like
-    "主播：付鹏", "嘉宾: Alice", "Host: Bob", "Guest — Carol". Host is
+    "主播：李雷", "嘉宾: Alice", "Host: Bob", "Guest — Carol". Host is
     listed first so single-speaker recordings resolve to the host name.
     Returns an empty list if no labels match.
     """
@@ -366,7 +366,7 @@ def extract_speaker_names_from_reference(reference_text: Optional[str]) -> list:
     # Name class: CJK chars, ASCII letters/digits, and a few name punctuations
     # (·-·). Stops at anything else — whitespace, sentence terminators,
     # parentheses, brackets, quotes, commas. Keeps us safe from
-    # "付鹏.本期..." or "Alice (senior analyst)" being captured as names.
+    # "李雷.本期..." or "Alice (senior analyst)" being captured as names.
     name_re = r"[\w一-鿿·\-]{1,30}"
     role_patterns = [
         (r"(?:主播|主持[人员]?|Host)\s*[:：\-—–]\s*(" + name_re + ")", hosts),

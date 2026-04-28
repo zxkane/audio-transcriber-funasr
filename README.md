@@ -1,6 +1,6 @@
 # FunASR Audio Transcriber
 
-[![View on ClawHub](https://img.shields.io/badge/ClawHub-audio--transcriber--funasr-6E56CF?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0id2hpdGUiPjxwYXRoIGQ9Ik0xMiAyTDIgN2wxMCA1IDEwLTUtMTAtNXptMCAxMUwyIDhsLjA1IDkuOTVMMTIgMjNsOS45NS01LjA1TDIyIDhsLTEwIDV6Ii8+PC9zdmc+)](https://clawhub.ai/zxkane/audio-transcriber-funasr)
+[![View on ClawHub](https://img.shields.io/badge/ClawHub-audio--transcriber--funasr-6E56CF?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0id2hpdGUiPjxwYXRoIGQ9Ik0xMiAyTDIgN2wxMCA1IDEwLTUtMTAtNXptMCAxMUwyIDhsLjA1IDkuOTVMMTIgMjNsOS45NS01LjA1TDIyIDhsLTEwIDV6Ii8+PC9zdmc+)](https://clawhub.ai/zxkane/zxkane-audio-transcriber-funasr)
 
 Claude Code plugin for multi-speaker meeting and podcast transcription with automatic speaker diarization and LLM cleanup, powered by [FunASR](https://github.com/modelscope/FunASR).
 

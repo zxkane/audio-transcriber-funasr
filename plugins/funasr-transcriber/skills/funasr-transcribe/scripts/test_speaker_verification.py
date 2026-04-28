@@ -16,6 +16,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent))
 
 from llm_utils import detect_llm_provider, is_retryable, call_llm
+import speaker_gender as sg
 import transcribe_funasr as tf
 import verify_speakers as vs
 
@@ -1357,6 +1358,385 @@ class TestPhase1Flags:
         assert saved[0]["text"] == "Hello"
         md_path = tmp_path / "test-transcript.md"
         assert not md_path.exists()
+
+
+# ──────────────────────────────────────────────
+# speaker_gender: classifier helpers
+# ──────────────────────────────────────────────
+
+class TestNormalizeGenderLabel:
+    def test_english_male_variants(self):
+        assert sg._normalize_gender_label("male") == "male"
+        assert sg._normalize_gender_label("M") == "male"
+        assert sg._normalize_gender_label("  Man ") == "male"
+
+    def test_english_female_variants(self):
+        assert sg._normalize_gender_label("Female") == "female"
+        assert sg._normalize_gender_label("f") == "female"
+        assert sg._normalize_gender_label("woman") == "female"
+
+    def test_chinese_variants(self):
+        assert sg._normalize_gender_label("男") == "male"
+        assert sg._normalize_gender_label("女") == "female"
+        assert sg._normalize_gender_label("男性") == "male"
+        assert sg._normalize_gender_label("女性") == "female"
+
+    def test_unknown_returns_none(self):
+        assert sg._normalize_gender_label("other") is None
+        assert sg._normalize_gender_label("") is None
+        assert sg._normalize_gender_label(None) is None
+
+
+class TestMajorityVote:
+    def test_clear_majority(self):
+        assert sg._majority_vote(["male", "male", "female"]) == "male"
+
+    def test_tie_returns_none(self):
+        assert sg._majority_vote(["male", "female"]) is None
+
+    def test_empty_returns_none(self):
+        assert sg._majority_vote([]) is None
+
+    def test_filters_invalid_labels(self):
+        assert sg._majority_vote(["male", "unknown", "male"]) == "male"
+
+
+class TestSelectSampleSegments:
+    def test_picks_longest_segments(self):
+        transcript = [
+            make_segment(0, 0, 2000, "short"),
+            make_segment(0, 2000, 10000, "long"),
+            make_segment(1, 10000, 12000, "other"),
+            make_segment(0, 12000, 18000, "medium"),
+        ]
+        picks = sg._select_sample_segments(transcript, speaker_id=0, max_samples=2)
+        durations = [p["end_ms"] - p["start_ms"] for p in picks]
+        assert durations == sorted(durations, reverse=True)
+        assert len(picks) == 2
+
+    def test_filters_short_segments(self):
+        transcript = [
+            make_segment(0, 0, 500, "too short"),
+            make_segment(0, 500, 1000, "also short"),
+        ]
+        picks = sg._select_sample_segments(transcript, speaker_id=0, min_duration_ms=1500)
+        assert picks == []
+
+    def test_returns_empty_when_speaker_absent(self):
+        transcript = [make_segment(1, 0, 5000, "hi")]
+        assert sg._select_sample_segments(transcript, speaker_id=0) == []
+
+
+class TestClassifySpeakerGender:
+    def test_uses_model_loader_hook(self):
+        transcript = [
+            make_segment(0, 0, 5000, "host talks"),
+            make_segment(0, 5000, 12000, "host talks more"),
+            make_segment(1, 12000, 18000, "guest talks"),
+        ]
+
+        class FakeModel:
+            def infer(self, start_ms, end_ms):
+                return "male" if start_ms < 12000 else "female"
+
+        result = sg.classify_speaker_gender(
+            audio_path="/dev/null",
+            transcript=transcript,
+            _model_loader=lambda: FakeModel(),
+        )
+        assert result == {0: "male", 1: "female"}
+
+    def test_majority_vote_per_speaker(self):
+        transcript = [
+            make_segment(0, 0, 5000, "a"),
+            make_segment(0, 5000, 10000, "b"),
+            make_segment(0, 10000, 15000, "c"),
+        ]
+        calls = {"n": 0}
+
+        class FakeModel:
+            def infer(self, start_ms, end_ms):
+                calls["n"] += 1
+                # 2x male, 1x female — majority male
+                return ["female", "male", "male"][calls["n"] - 1]
+
+        result = sg.classify_speaker_gender(
+            audio_path="/dev/null",
+            transcript=transcript,
+            _model_loader=lambda: FakeModel(),
+            max_samples=3,
+        )
+        assert result == {0: "male"}
+
+    def test_tie_produces_no_entry(self):
+        transcript = [
+            make_segment(0, 0, 5000, "a"),
+            make_segment(0, 5000, 10000, "b"),
+        ]
+
+        class FakeModel:
+            def infer(self, start_ms, end_ms):
+                return "male" if start_ms == 0 else "female"
+
+        result = sg.classify_speaker_gender(
+            audio_path="/dev/null",
+            transcript=transcript,
+            _model_loader=lambda: FakeModel(),
+            max_samples=2,
+        )
+        assert result == {}
+
+    def test_skips_speakers_without_long_segments(self):
+        transcript = [
+            make_segment(0, 0, 500, "too short"),
+            make_segment(1, 500, 10000, "long"),
+        ]
+
+        class FakeModel:
+            def infer(self, start_ms, end_ms):
+                return "female"
+
+        result = sg.classify_speaker_gender(
+            audio_path="/dev/null",
+            transcript=transcript,
+            _model_loader=lambda: FakeModel(),
+        )
+        assert result == {1: "female"}
+
+    def test_inference_exception_does_not_break_other_speakers(self, capsys):
+        transcript = [
+            make_segment(0, 0, 5000, "a"),
+            make_segment(1, 5000, 10000, "b"),
+        ]
+
+        class FakeModel:
+            def infer(self, start_ms, end_ms):
+                if start_ms == 0:
+                    raise RuntimeError("model blew up")
+                return "female"
+
+        result = sg.classify_speaker_gender(
+            audio_path="/dev/null",
+            transcript=transcript,
+            _model_loader=lambda: FakeModel(),
+        )
+        assert result == {1: "female"}
+
+    def test_loader_failure_returns_empty(self, capsys):
+        transcript = [make_segment(0, 0, 5000, "a")]
+
+        def broken_loader():
+            raise ImportError("modelscope not installed")
+
+        result = sg.classify_speaker_gender(
+            audio_path="/dev/null",
+            transcript=transcript,
+            _model_loader=broken_loader,
+        )
+        assert result == {}
+
+    def test_empty_transcript(self):
+        assert sg.classify_speaker_gender("/dev/null", []) == {}
+
+    def test_respects_speaker_ids_filter(self):
+        transcript = [
+            make_segment(0, 0, 5000, "a"),
+            make_segment(1, 5000, 10000, "b"),
+        ]
+
+        class FakeModel:
+            def infer(self, start_ms, end_ms):
+                return "male"
+
+        result = sg.classify_speaker_gender(
+            audio_path="/dev/null",
+            transcript=transcript,
+            speaker_ids=[1],
+            _model_loader=lambda: FakeModel(),
+        )
+        assert result == {1: "male"}
+
+
+# ──────────────────────────────────────────────
+# speaker_gender: reference-text extraction
+# ──────────────────────────────────────────────
+
+class TestExtractGenderFromReference:
+    def test_role_with_parenthetical_gender_chinese(self):
+        text = "主播（女）：韩梅梅\n嘉宾（男）：李雷"
+        assert sg.extract_gender_from_reference(text) == {
+            "韩梅梅": "female", "李雷": "male"}
+
+    def test_role_with_parenthetical_gender_english(self):
+        text = "Host (female): Alice\nGuest (male): Bob"
+        assert sg.extract_gender_from_reference(text) == {
+            "Alice": "female", "Bob": "male"}
+
+    def test_gender_prefixed_role(self):
+        text = "男主播 李雷\n女嘉宾 韩梅梅"
+        result = sg.extract_gender_from_reference(text)
+        assert result.get("李雷") == "male"
+        assert result.get("韩梅梅") == "female"
+
+    def test_name_followed_by_gender(self):
+        text = "Alice (female) is a researcher. 韩梅梅（女）"
+        result = sg.extract_gender_from_reference(text)
+        assert result.get("Alice") == "female"
+        assert result.get("韩梅梅") == "female"
+
+    def test_no_matches(self):
+        assert sg.extract_gender_from_reference("just some plain text") == {}
+
+    def test_empty_input(self):
+        assert sg.extract_gender_from_reference("") == {}
+        assert sg.extract_gender_from_reference(None) == {}
+
+    def test_first_match_wins(self):
+        text = "Host (female): Alice\nAlice (male) appears again"
+        assert sg.extract_gender_from_reference(text)["Alice"] == "female"
+
+
+# ──────────────────────────────────────────────
+# speaker_gender: merge + CLI parsing
+# ──────────────────────────────────────────────
+
+class TestMergeGenderSources:
+    def test_reference_overrides_auto(self):
+        auto = {0: "male", 1: "female"}
+        reference = {"Alice": "female"}
+        speaker_map = {0: "Alice", 1: "Bob"}
+        merged = sg.merge_gender_sources(auto, reference, speaker_map)
+        assert merged == {0: "female", 1: "female"}
+
+    def test_reference_fills_missing_auto(self):
+        auto = {}
+        reference = {"Alice": "female", "Bob": "male"}
+        speaker_map = {0: "Alice", 1: "Bob"}
+        assert sg.merge_gender_sources(auto, reference, speaker_map) == {
+            0: "female", 1: "male"}
+
+    def test_reference_without_matching_name_ignored(self):
+        auto = {0: "male"}
+        reference = {"Carol": "female"}
+        speaker_map = {0: "Alice"}
+        assert sg.merge_gender_sources(auto, reference, speaker_map) == {0: "male"}
+
+    def test_empty_inputs(self):
+        assert sg.merge_gender_sources(None, None, None) == {}
+        assert sg.merge_gender_sources({}, {}, {}) == {}
+
+
+class TestParseGenderCliArg:
+    def test_name_gender_pairs(self):
+        speaker_map = {0: "Alice", 1: "Bob"}
+        assert sg.parse_gender_cli_arg("Alice:female,Bob:male", speaker_map) == {
+            0: "female", 1: "male"}
+
+    def test_equals_separator(self):
+        speaker_map = {0: "Alice", 1: "Bob"}
+        assert sg.parse_gender_cli_arg("Alice=F,Bob=M", speaker_map) == {
+            0: "female", 1: "male"}
+
+    def test_bare_gender_list_positional(self):
+        speaker_map = {0: "Alice", 1: "Bob"}
+        assert sg.parse_gender_cli_arg("female,male", speaker_map) == {
+            0: "female", 1: "male"}
+
+    def test_ignores_unknown_names(self):
+        speaker_map = {0: "Alice"}
+        assert sg.parse_gender_cli_arg("Nobody:male", speaker_map) == {}
+
+    def test_empty_input(self):
+        assert sg.parse_gender_cli_arg("", {0: "Alice"}) == {}
+        assert sg.parse_gender_cli_arg(None, {0: "Alice"}) == {}
+
+    def test_chinese_name_mapping(self):
+        speaker_map = {0: "韩梅梅", 1: "李雷"}
+        assert sg.parse_gender_cli_arg("韩梅梅:女,李雷:男", speaker_map) == {
+            0: "female", 1: "male"}
+
+
+class TestFormatGenderLabel:
+    def test_known_labels(self):
+        assert sg.format_gender_label("male") == "(male)"
+        assert sg.format_gender_label("female") == "(female)"
+
+    def test_unknown_is_empty(self):
+        assert sg.format_gender_label(None) == ""
+        assert sg.format_gender_label("other") == ""
+
+
+# ──────────────────────────────────────────────
+# transcribe_funasr: gender-aware speaker list rendering
+# ──────────────────────────────────────────────
+
+class TestAssembleMarkdownWithGender:
+    def test_renders_gender_in_speaker_list(self):
+        md = tf.assemble_markdown(
+            ["[00:00:00] Alice: hi"],
+            {
+                "title": "Test",
+                "filename": "x.wav",
+                "duration_ms": 1000,
+                "num_speakers": 2,
+                "language": "zh",
+                "asr_engine": "FunASR",
+                "speakers": ["Alice", "Bob"],
+                "speaker_genders": {"Alice": "female", "Bob": "male"},
+            },
+        )
+        assert "Alice (female)" in md
+        assert "Bob (male)" in md
+
+    def test_omits_gender_when_unknown(self):
+        md = tf.assemble_markdown(
+            ["[00:00:00] Alice: hi"],
+            {
+                "title": "Test",
+                "filename": "x.wav",
+                "duration_ms": 1000,
+                "num_speakers": 1,
+                "language": "zh",
+                "asr_engine": "FunASR",
+                "speakers": ["Alice"],
+                "speaker_genders": {},
+            },
+        )
+        assert "Alice" in md
+        assert "(male)" not in md
+        assert "(female)" not in md
+
+    def test_works_without_speaker_genders_key(self):
+        md = tf.assemble_markdown(
+            ["line"],
+            {
+                "title": "T", "filename": "f", "duration_ms": 1,
+                "num_speakers": 1, "language": "zh", "asr_engine": "E",
+                "speakers": ["Alice"],
+            },
+        )
+        assert "Alice" in md
+
+
+class TestBuildSystemPromptWithGender:
+    def test_injects_gender_hints(self):
+        prompt = tf.build_system_prompt(
+            speaker_context=None,
+            reference_text=None,
+            speaker_names=["Alice", "Bob"],
+            speaker_genders={"Alice": "female", "Bob": "male"},
+        )
+        assert "Alice" in prompt and "female" in prompt
+        assert "Bob" in prompt and "male" in prompt
+
+    def test_no_gender_hints_when_empty(self):
+        prompt = tf.build_system_prompt(
+            speaker_context=None,
+            reference_text=None,
+            speaker_names=["Alice"],
+            speaker_genders=None,
+        )
+        assert "female" not in prompt.lower()
 
 
 if __name__ == "__main__":

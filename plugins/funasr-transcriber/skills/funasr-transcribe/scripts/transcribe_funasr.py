@@ -62,6 +62,13 @@ from pathlib import Path
 from typing import Optional
 
 from llm_utils import call_llm, detect_llm_provider
+from speaker_gender import (
+    classify_speaker_gender,
+    extract_gender_from_reference,
+    format_gender_label,
+    merge_gender_sources,
+    parse_gender_cli_arg,
+)
 
 
 # ──────────────────────────────────────────────
@@ -115,6 +122,9 @@ MODEL_PRESETS = {
 }
 
 SUPPORTED_LANGS = list(MODEL_PRESETS.keys())
+
+# 3D-Speaker CAM++ gender classifier (binary male/female, 16 kHz)
+DEFAULT_GENDER_MODEL = "iic/speech_campplus_two_class_gender_16k"
 
 
 def validate_lang_diarization(lang: str, num_speakers: Optional[int]) -> None:
@@ -771,7 +781,8 @@ Outside montage sections, trust the existing speaker labels."""
 
 def build_system_prompt(speaker_context: Optional[dict] = None,
                         reference_text: Optional[str] = None,
-                        speaker_names: Optional[list] = None) -> str:
+                        speaker_names: Optional[list] = None,
+                        speaker_genders: Optional[dict] = None) -> str:
     """Build the LLM system prompt, enriched with all available context."""
     prompt = DEFAULT_SYSTEM_PROMPT
 
@@ -782,6 +793,17 @@ def build_system_prompt(speaker_context: Optional[dict] = None,
                    "If a speaker says their own name in the content, treat that as ground truth. "
                    "Common ASR errors for Chinese names include phonetically similar characters "
                    "(e.g., 关于→关羽, 张非→张飞, 刘备→刘备).")
+
+    # Inject speaker gender so the LLM can fix pronoun drift (他/她, he/she).
+    # This matters for podcasts where ASR sometimes misgenders the host.
+    if speaker_genders:
+        hints = [f"{name} is {gender}"
+                 for name, gender in speaker_genders.items()
+                 if gender in ("male", "female")]
+        if hints:
+            prompt += ("\n\nSpeaker gender (authoritative — use to fix incorrect "
+                       "pronouns such as 他/她, he/she, his/her in the transcript):\n"
+                       + "\n".join(f"- {h}" for h in hints))
 
     # Inject speaker context (roles, background)
     if speaker_context:
@@ -948,7 +970,8 @@ def _verify_multi_speakers(first_chunk_text: str, speaker_map: dict,
 
 def run_llm_cleanup(merged: list, speaker_map: dict, model_id: str, region: str,
                     speaker_context: Optional[dict] = None, cache_dir: Optional[Path] = None,
-                    reference_text: Optional[str] = None, speaker_names: Optional[list] = None) -> list:
+                    reference_text: Optional[str] = None, speaker_names: Optional[list] = None,
+                    speaker_genders: Optional[dict] = None) -> list:
     """Chunk merged transcript and clean each via LLM. Supports resume via cache_dir."""
     chunks = chunk_by_duration(merged)
 
@@ -958,7 +981,8 @@ def run_llm_cleanup(merged: list, speaker_map: dict, model_id: str, region: str,
         speaker_map = _verify_speaker_roles_via_llm(
             first_chunk_text, speaker_map, speaker_context, model_id, region)
 
-    system_prompt = build_system_prompt(speaker_context, reference_text, speaker_names)
+    system_prompt = build_system_prompt(speaker_context, reference_text,
+                                        speaker_names, speaker_genders)
     cleaned = []
     failed_chunks = []
     if cache_dir:
@@ -1006,7 +1030,12 @@ def run_llm_cleanup(merged: list, speaker_map: dict, model_id: str, region: str,
 # ──────────────────────────────────────────────
 
 def assemble_markdown(cleaned_parts: list, metadata: dict) -> str:
-    speakers_list = "\n".join(f"- {name}" for name in metadata.get("speakers", []))
+    genders = metadata.get("speaker_genders") or {}
+    speaker_lines = []
+    for name in metadata.get("speakers", []):
+        suffix = format_gender_label(genders.get(name))
+        speaker_lines.append(f"- {name} {suffix}".rstrip())
+    speakers_list = "\n".join(speaker_lines)
     duration_s = metadata.get("duration_ms", 0) / 1000
     h, m = int(duration_s // 3600), int((duration_s % 3600) // 60)
 
@@ -1099,6 +1128,15 @@ def main():
                    help="AWS region for Bedrock (only used when provider is bedrock)")
     p.add_argument("--speaker-context", type=str, default=None,
                    help="JSON file with per-speaker context to help LLM identify speakers")
+    p.add_argument("--detect-gender", dest="detect_gender", action="store_true", default=True,
+                   help="Detect speaker gender via CAM++ gender classifier (default: on)")
+    p.add_argument("--no-detect-gender", dest="detect_gender", action="store_false",
+                   help="Disable speaker gender detection")
+    p.add_argument("--speaker-genders", type=str, default=None,
+                   help="Override gender per speaker (e.g. 'Alice:female,Bob:male' or "
+                        "positional 'female,male'). Takes precedence over auto-detection.")
+    p.add_argument("--gender-model", type=str, default=DEFAULT_GENDER_MODEL,
+                   help=f"Gender classifier model ID (default: {DEFAULT_GENDER_MODEL})")
     p.add_argument("--title", type=str, default="Meeting Transcript",
                    help="Title for the output document (default: 'Meeting Transcript')")
     p.add_argument("--phase1-only", action="store_true",
@@ -1268,6 +1306,26 @@ def main():
     speaker_map = verify_speaker_assignment(transcript, speaker_map, speaker_names)
     print(f"[Phase 2] Merged: {len(transcript)} sentences -> {len(merged)} segments")
 
+    # Gender detection: reference hints + explicit CLI overrides + CAM++ classifier.
+    # Explicit CLI overrides always win; reference hints win over auto-detection.
+    speaker_genders_by_id: dict = {}
+    if args.detect_gender:
+        print("  Gender detection (CAM++)...")
+        auto = classify_speaker_gender(
+            asr_audio, transcript, list(speaker_map.keys()),
+            model_id=args.gender_model, device=args.device)
+        ref_gender = extract_gender_from_reference(reference_text)
+        speaker_genders_by_id = merge_gender_sources(auto, ref_gender, speaker_map)
+    cli_override = parse_gender_cli_arg(args.speaker_genders, speaker_map)
+    speaker_genders_by_id.update(cli_override)
+    speaker_genders_by_name = {
+        speaker_map[sid]: g for sid, g in speaker_genders_by_id.items()
+        if sid in speaker_map
+    }
+    if speaker_genders_by_name:
+        pretty = ", ".join(f"{n}={g}" for n, g in speaker_genders_by_name.items())
+        print(f"  Speaker genders: {pretty}")
+
     # ── Phase 3: LLM cleanup ──
     speaker_context = None
     if args.speaker_context:
@@ -1282,7 +1340,8 @@ def main():
         print("[Phase 3] LLM cleanup...")
         cleaned_parts = run_llm_cleanup(merged, speaker_map, args.model,
                                         args.bedrock_region, speaker_context,
-                                        cache_dir, reference_text, speaker_names)
+                                        cache_dir, reference_text, speaker_names,
+                                        speaker_genders_by_name)
         if args.clean_cache and cache_dir.exists():
             for f in cache_dir.glob("chunk_*.txt"):
                 f.unlink()
@@ -1300,6 +1359,7 @@ def main():
         "language": preset["label"],
         "asr_engine": f"FunASR ({preset['asr'].split('/')[-1]})",
         "speakers": [speaker_map.get(s, f"Speaker {s+1}") for s in actual_speakers],
+        "speaker_genders": speaker_genders_by_name,
     })
     output_path.write_text(md, encoding="utf-8")
     print(f"\nDone: {output_path} ({len(merged)} segments, "

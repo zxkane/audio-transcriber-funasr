@@ -236,6 +236,8 @@ validates that no audio is lost (detects silent truncation).
 | `--num-speakers N` | Expected speaker count (improves diarization) |
 | `--speakers "A,B,C"` | Assign real names by first-appearance order |
 | `--speaker-context F` | JSON with per-speaker roles for LLM |
+| `--no-detect-gender` | Disable automatic speaker gender detection (CAM++ gender classifier) |
+| `--speaker-genders "A:female,B:male"` | Override per-speaker gender (also accepts positional `female,male`) |
 | `--audio-format` | `flac` (default), `opus`, `wav` |
 | `--device cpu` | Force CPU mode |
 | `--batch-size N` | Adjust for memory (60 for CPU, 100 if GPU OOM) |
@@ -262,6 +264,22 @@ FunASR's CAM++ may merge acoustically similar speakers. To improve:
 2. **`--hotwords`** — Include participant names (Chinese names work best)
 3. **`--speaker-context`** — Provide per-person keywords for LLM splitting
 4. **Keyword matching** — Search `*_raw_transcript.json` for unique phrases
+
+### Speaker gender
+
+Enabled by default: each detected speaker is classified as `male` / `female`
+via 3D-Speaker's CAM++ gender classifier (`iic/speech_campplus_two_class_gender_16k`).
+The result appears next to each name in the **Speaker List** table and is
+injected into the LLM cleanup prompt so pronouns (他/她, he/she) get corrected.
+
+Precedence when combined:
+
+1. `--speaker-genders "Alice:female,Bob:male"` (explicit CLI) — always wins
+2. Reference text hints like `主播（女）：韩梅梅` or `Host (male): Alice` — override auto
+3. CAM++ auto-detection — fallback
+
+Disable with `--no-detect-gender` if you don't need gender and want to save
+the ~500 MB model download and extra inference time.
 
 ## CPU-only / Low-Memory Machines
 

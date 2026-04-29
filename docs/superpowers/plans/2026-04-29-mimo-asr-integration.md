@@ -98,7 +98,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 
 def require_cuda_and_vram(min_gb: int = 20) -> None:
@@ -581,7 +581,7 @@ def _cuda_cleanup() -> None:
 
 def infer_with_retry(mimo, audio_path: str, audio_tag: str,
                      max_retries: int = 3,
-                     backoffs: list = (0.5, 2.0, 5.0)) -> str:
+                     backoffs: Sequence[float] = (0.5, 2.0, 5.0)) -> str:
     """Call mimo.asr_sft with up to max_retries attempts. Raises on final failure.
 
     Between attempts, run gc + torch.cuda.empty_cache() to recover from
@@ -1080,7 +1080,7 @@ def transcribe_with_mimo(audio_path: str,
                          spk_model_id: str = "iic/speech_campplus_sv_zh-cn_16k-common",
                          vad_model_id: str = "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
                          repo_path: Optional[str] = None,
-                         backoffs: list = (0.5, 2.0, 5.0)) -> list:
+                         backoffs: Sequence[float] = (0.5, 2.0, 5.0)) -> list:
     """Phase 1 MiMo path: VAD -> per-segment MiMo ASR -> CAM++ speaker labels.
 
     Returns a sentence_info-shaped list of

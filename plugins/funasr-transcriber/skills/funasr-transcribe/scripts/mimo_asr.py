@@ -23,7 +23,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
 
 
 def require_cuda_and_vram(min_gb: int = 20) -> None:
@@ -46,7 +46,7 @@ def transcribe_with_mimo(audio_path: str,
                          spk_model_id: str = "iic/speech_campplus_sv_zh-cn_16k-common",
                          vad_model_id: str = "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
                          repo_path: Optional[str] = None,
-                         backoffs: list = (0.5, 2.0, 5.0)) -> list:
+                         backoffs: Sequence[float] = (0.5, 2.0, 5.0)) -> list:
     """Phase 1 MiMo path: VAD -> MiMo ASR -> CAM++ speaker labels. Not implemented yet."""
     raise NotImplementedError
 

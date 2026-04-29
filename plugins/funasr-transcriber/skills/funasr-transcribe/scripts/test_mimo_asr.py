@@ -218,3 +218,41 @@ class TestVadAndExtract:
         assert "-ss" in cmd and "1.000" in cmd
         assert "-to" in cmd and "4.200" in cmd
         assert str(src) in cmd
+
+
+class TestAssignSpeakersViaCam:
+    def test_assigns_speaker_ids_from_embeddings(self, tmp_path):
+        # 4 segments; embeddings designed so KMeans(k=2) splits {0,2} vs {1,3}
+        segments = [
+            {"idx": 0, "text": "a", "start_ms": 0,     "end_ms": 1000},
+            {"idx": 1, "text": "b", "start_ms": 1500,  "end_ms": 2500},
+            {"idx": 2, "text": "c", "start_ms": 3000,  "end_ms": 4000},
+            {"idx": 3, "text": "d", "start_ms": 4500,  "end_ms": 5500},
+        ]
+
+        import numpy as np
+        embeddings = {
+            (0, 1000):     np.array([1.0, 0.0], dtype=np.float32),
+            (1500, 2500):  np.array([0.0, 1.0], dtype=np.float32),
+            (3000, 4000):  np.array([1.0, 0.1], dtype=np.float32),
+            (4500, 5500):  np.array([0.0, 0.9], dtype=np.float32),
+        }
+
+        def fake_embed(start_ms, end_ms, *a, **kw):
+            return embeddings[(start_ms, end_ms)]
+
+        fake_sf = MagicMock()
+        # sf.read returns (audio_data, sample_rate); 10s of silence at 16kHz
+        fake_sf.read.return_value = (np.zeros(160000, dtype=np.float32), 16000)
+        fake_funasr = MagicMock()
+        # AutoModel call returns a mock model; _extract_speaker_embedding is patched anyway
+        with patch.dict(sys.modules, {"soundfile": fake_sf, "funasr": fake_funasr}), \
+             patch.object(mimo_asr, "_extract_speaker_embedding",
+                          side_effect=fake_embed):
+            out = mimo_asr.assign_speakers_via_cam(
+                segments, "/tmp/fake.flac",
+                num_speakers=2, spk_model_id="iic/x", device="cpu",
+            )
+        assert [s["speaker"] for s in out] == [out[0]["speaker"], out[1]["speaker"],
+                                                out[0]["speaker"], out[1]["speaker"]]
+        assert out[0]["speaker"] != out[1]["speaker"]

@@ -132,6 +132,78 @@ def transcribe_with_mimo(audio_path: str,
     raise NotImplementedError
 
 
+def _extract_speaker_embedding(start_ms: int, end_ms: int, spk_model,
+                               audio_data, sample_rate: int):
+    """Extract a CAM++ embedding for one audio segment. Returns np.ndarray or None."""
+    import numpy as np
+    start = int(start_ms * sample_rate / 1000)
+    end = int(end_ms * sample_rate / 1000)
+    segment = audio_data[start:end]
+    if len(segment) < sample_rate * 0.3:
+        return None
+    try:
+        result = spk_model.generate(input=segment)
+        if result and isinstance(result, list) and len(result) > 0:
+            emb = result[0].get("spk_embedding")
+            if emb is not None:
+                return np.asarray(emb, dtype=np.float32).flatten()
+    except Exception as e:
+        print(f"    WARNING: embedding extraction failed at {start_ms}ms: {e}")
+    return None
+
+
+def assign_speakers_via_cam(segments: list, audio_path: str,
+                            num_speakers: Optional[int],
+                            spk_model_id: str = "iic/speech_campplus_sv_zh-cn_16k-common",
+                            device: str = "cuda:0") -> list:
+    """Attach speaker IDs to segments via CAM++ embeddings + KMeans clustering.
+
+    Falls back to speaker=0 for every segment if num_speakers is None or 1,
+    or if too few segments have valid embeddings.
+    """
+    import numpy as np
+
+    if num_speakers is None or num_speakers <= 1 or len(segments) < 2:
+        for s in segments:
+            s["speaker"] = 0
+        return segments
+
+    import soundfile as sf
+    from funasr import AutoModel
+    from sklearn.cluster import KMeans
+
+    spk_model = AutoModel(model=spk_model_id, device=device, disable_update=True)
+    audio_data, sample_rate = sf.read(audio_path, dtype="float32")
+    if len(audio_data.shape) > 1:
+        audio_data = audio_data[:, 0]
+
+    embeds = []
+    kept_idx = []
+    for i, seg in enumerate(segments):
+        emb = _extract_speaker_embedding(
+            seg["start_ms"], seg["end_ms"],
+            spk_model, audio_data, sample_rate,
+        )
+        if emb is not None:
+            embeds.append(emb)
+            kept_idx.append(i)
+
+    if len(embeds) < num_speakers:
+        print(f"  WARNING: only {len(embeds)} segments with embeddings "
+              f"(need ≥{num_speakers}); assigning speaker=0 to all.")
+        for s in segments:
+            s["speaker"] = 0
+        return segments
+
+    X = np.stack(embeds)
+    labels = KMeans(n_clusters=num_speakers, n_init=10,
+                    random_state=0).fit_predict(X)
+    label_map = dict(zip(kept_idx, labels))
+    for i, seg in enumerate(segments):
+        seg["speaker"] = int(label_map.get(i, 0))
+    return segments
+
+
 def run_fsmn_vad(audio_path: str,
                  model_id: str = "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
                  device: str = "cuda:0",

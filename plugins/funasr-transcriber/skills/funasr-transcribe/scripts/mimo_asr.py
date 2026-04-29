@@ -132,6 +132,45 @@ def transcribe_with_mimo(audio_path: str,
     raise NotImplementedError
 
 
+def run_fsmn_vad(audio_path: str,
+                 model_id: str = "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
+                 device: str = "cuda:0",
+                 max_single_segment_time: int = 60000) -> list:
+    """Run FSMN VAD and return a list of (start_ms, end_ms) intervals."""
+    from funasr import AutoModel
+    model = AutoModel(
+        model=model_id,
+        vad_kwargs={"max_single_segment_time": max_single_segment_time},
+        device=device,
+        disable_update=True,
+    )
+    res = model.generate(input=audio_path)
+    if not res or "value" not in res[0]:
+        return []
+    return [(int(s), int(e)) for s, e in res[0]["value"]]
+
+
+def extract_segment(audio_path: str, start_ms: int, end_ms: int,
+                    out_dir: str) -> str:
+    """Cut [start_ms, end_ms] from audio_path into a 16kHz mono WAV in out_dir.
+
+    Returns the output file path. Uses ffmpeg so we don't load the full
+    audio into memory for each chunk.
+    """
+    start_s = start_ms / 1000.0
+    end_s = end_ms / 1000.0
+    out_path = Path(out_dir) / f"seg_{start_ms:010d}_{end_ms:010d}.wav"
+    cmd = [
+        "ffmpeg", "-v", "error", "-y",
+        "-ss", f"{start_s:.3f}", "-to", f"{end_s:.3f}",
+        "-i", audio_path,
+        "-ac", "1", "-ar", "16000", "-f", "wav",
+        str(out_path),
+    ]
+    subprocess.run(cmd, check=True, capture_output=True)
+    return str(out_path)
+
+
 def compute_audio_hash(path: str, _chunk: int = 1 << 20) -> str:
     """SHA256 of the file at path, streamed, prefixed with 'sha256:'."""
     h = hashlib.sha256()

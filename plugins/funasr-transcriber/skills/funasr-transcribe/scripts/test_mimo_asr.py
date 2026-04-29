@@ -5,6 +5,7 @@ Safe for CI: does not require a GPU, MiMo weights, or network access.
 """
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -175,3 +176,45 @@ class TestInferWithRetry:
                 mimo_asr.infer_with_retry(mimo, "/tmp/a.wav", "<chinese>",
                                           max_retries=3, backoffs=[0.0, 0.0, 0.0])
         assert mimo.asr_sft.call_count == 3
+
+
+class TestVadAndExtract:
+    def test_run_fsmn_vad_parses_intervals(self):
+        # FunASR VAD output shape: [{"value": [[start_ms, end_ms], ...], "key": "..."}]
+        fake_autom = MagicMock()
+        fake_model = MagicMock()
+        fake_model.generate.return_value = [{
+            "value": [[0, 1200], [1800, 5200], [5300, 8000]],
+            "key": "clip",
+        }]
+        fake_autom.AutoModel.return_value = fake_model
+        with patch.dict(sys.modules, {"funasr": fake_autom}):
+            segs = mimo_asr.run_fsmn_vad("/tmp/x.flac",
+                                         model_id="iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
+                                         device="cpu")
+        assert segs == [(0, 1200), (1800, 5200), (5300, 8000)]
+
+    def test_extract_segment_invokes_ffmpeg(self, tmp_path):
+        src = tmp_path / "in.flac"
+        src.write_bytes(b"fake")
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+
+        calls = []
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            # ffmpeg creates the output file
+            out_idx = cmd.index("-y") + 1 if "-y" in cmd else -1
+            Path(cmd[-1]).write_bytes(b"wav")
+            return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+        with patch("subprocess.run", side_effect=fake_run):
+            path = mimo_asr.extract_segment(str(src), 1000, 4200, str(out_dir))
+        assert Path(path).exists()
+        assert Path(path).name.endswith(".wav")
+        # Verify ffmpeg was called with -ss 1.0 -to 4.2 on the source file
+        cmd = calls[0]
+        assert "ffmpeg" in cmd[0]
+        assert "-ss" in cmd and "1.000" in cmd
+        assert "-to" in cmd and "4.200" in cmd
+        assert str(src) in cmd

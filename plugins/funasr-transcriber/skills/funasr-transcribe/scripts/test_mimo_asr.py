@@ -378,6 +378,29 @@ class TestTranscribeWithMimo:
         assert mimo_inst.asr_sft.call_count == 2  # only 2 new calls
         assert not partial.exists()  # cleaned on success
 
+    def test_resume_without_partial_raises_clear_error(self, tmp_path):
+        audio = tmp_path / "pod.flac"
+        audio.write_bytes(b"fake")
+
+        with patch.object(mimo_asr, "require_cuda_and_vram"), \
+             patch.object(mimo_asr, "require_mimo_installed"):
+            with pytest.raises(RuntimeError, match=r"--resume-mimo requested"):
+                mimo_asr.transcribe_with_mimo(
+                    str(audio), num_speakers=2, audio_tag="<chinese>",
+                    weights_path=str(tmp_path), resume=True,
+                )
+
+
+class TestExtractSegmentValidation:
+    """Nonexistent audio should fail with a clear message, not ffmpeg output."""
+
+    def test_missing_audio_file_raises_clear_error(self, tmp_path):
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        with pytest.raises(RuntimeError, match=r"Audio file not found"):
+            mimo_asr.extract_segment(str(tmp_path / "does_not_exist.flac"),
+                                     0, 1000, str(out_dir))
+
 
 class TestCliWiring:
     def test_lang_mimo_in_supported(self):

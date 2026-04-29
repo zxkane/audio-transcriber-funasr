@@ -173,6 +173,11 @@ def transcribe_with_mimo(audio_path: str,
     audio_hash = compute_audio_hash(audio_path)
 
     if resume:
+        if not partial_path.exists():
+            raise RuntimeError(
+                f"--resume-mimo requested but {partial_path.name} not found. "
+                f"Run without --resume-mimo to start fresh."
+            )
         state = load_partial(partial_path, audio_hash, audio_tag)
         vad_segments = [tuple(s) for s in state["vad_segments"]]
         completed = {c["idx"]: c for c in state["completed"]}
@@ -186,10 +191,14 @@ def transcribe_with_mimo(audio_path: str,
         completed = {}
         start_idx = 0
 
-    # 3. Load MiMo
+    # 3. Load MiMo. Initialize to None so the `finally` block is safe even if
+    # a future refactor moves _load_mimo inside the try. Today, _load_mimo is
+    # outside the try so an exception here exits the function before `finally`
+    # is reached, but the guard costs nothing and future-proofs the pattern.
     print(f"[Phase 1b] MiMo ASR (local, GPU)")
     print(f"  Loading MiMo from {weights_path}...")
     t_load = time.time()
+    mimo = None
     mimo = _load_mimo(weights_path)
     print(f"  Loaded in {time.time() - t_load:.1f}s")
 
@@ -224,7 +233,8 @@ def transcribe_with_mimo(audio_path: str,
                 print(f"  [{i+1:3d}/{len(vad_segments)}] {_format_time(s_ms)} "
                       f"({e_ms - s_ms}ms) -> {text[:40]}")
     finally:
-        _free_mimo(mimo)
+        if mimo is not None:
+            _free_mimo(mimo)
 
     wall = time.time() - t0
     if vad_segments:
@@ -232,8 +242,18 @@ def transcribe_with_mimo(audio_path: str,
         if duration > 0:
             print(f"  MiMo inference: {wall:.1f}s (RTF {wall / duration:.3f})")
 
-    # 5. Speaker clustering on the same VAD segments
+    # 5. Speaker clustering on the same VAD segments. Guard against the
+    # "impossible" state where the loop exited without raising and yet some
+    # segments are missing from `completed` — this would indicate a future bug
+    # or a concurrent-modification scenario and is cheaper to surface clearly.
     print(f"[Phase 1c] CAM++ speaker clustering...")
+    if len(completed) != len(vad_segments):
+        raise RuntimeError(
+            f"Incomplete transcription: {len(completed)}/{len(vad_segments)} "
+            f"segments completed without raising. The transcript may be "
+            f"corrupt. Try resuming with --resume-mimo, or delete "
+            f"{partial_path.name} to restart."
+        )
     segments = [completed[i] for i in range(len(vad_segments))]
     segments = assign_speakers_via_cam(segments, audio_path, num_speakers,
                                        spk_model_id, device)
@@ -341,14 +361,24 @@ def extract_segment(audio_path: str, start_ms: int, end_ms: int,
 
     Returns the output file path. Uses ffmpeg so we don't load the full
     audio into memory for each chunk.
+
+    `subprocess.run` is called with a list (no shell=True) so values are
+    passed as individual argv elements to ffmpeg without shell interpretation
+    — there is no shell-injection path. We still validate that the audio
+    exists so failures surface with a clear message instead of ffmpeg's
+    cryptic "No such file or directory" output hundreds of segments later.
     """
+    audio_p = Path(audio_path)
+    if not audio_p.is_file():
+        raise RuntimeError(f"Audio file not found: {audio_path}")
+
     start_s = start_ms / 1000.0
     end_s = end_ms / 1000.0
     out_path = Path(out_dir) / f"seg_{start_ms:010d}_{end_ms:010d}.wav"
     cmd = [
         "ffmpeg", "-v", "error", "-y",
         "-ss", f"{start_s:.3f}", "-to", f"{end_s:.3f}",
-        "-i", audio_path,
+        "-i", str(audio_p),
         "-ac", "1", "-ar", "16000", "-f", "wav",
         str(out_path),
     ]

@@ -119,6 +119,16 @@ MODEL_PRESETS = {
         "spk": "iic/speech_campplus_sv_zh-cn_16k-common",
         "hotword_support": False,
     },
+    "mimo": {
+        "label": "MiMo-V2.5-ASR (local 8B, GPU-only, VAD+CAM++ diarization)",
+        # Placeholder IDs — mimo preset is dispatched to mimo_asr module,
+        # which loads weights from HuggingFace rather than ModelScope.
+        "asr": "XiaomiMiMo/MiMo-V2.5-ASR",
+        "vad": "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
+        "punc": None,
+        "spk": "iic/speech_campplus_sv_zh-cn_16k-common",
+        "hotword_support": False,
+    },
 }
 
 SUPPORTED_LANGS = list(MODEL_PRESETS.keys())
@@ -1194,6 +1204,34 @@ def resolve_hotwords(hotwords_arg: str) -> str:
 # Main
 # ──────────────────────────────────────────────
 
+def warn_on_incompatible_flags(lang: str, hotwords, batch_size: int,
+                               default_batch: int) -> dict:
+    """Warn and scrub flags that don't apply to the chosen language preset.
+
+    Returns a dict of resolved values (currently {'hotwords': ...}).
+    """
+    resolved = {"hotwords": hotwords}
+    if lang == "mimo":
+        if hotwords:
+            print("  Warning: --hotwords ignored for --lang mimo "
+                  "(MiMo does not support hotword biasing)")
+            resolved["hotwords"] = None
+        if batch_size != default_batch:
+            print(f"  Warning: --batch-size ignored for --lang mimo "
+                  f"(use --mimo-batch instead; got {batch_size})")
+    return resolved
+
+
+def resolve_mimo_weights_path(cli_value: Optional[str]) -> str:
+    """CLI flag > $HF_HOME > ~/.cache/huggingface, as per the design spec."""
+    if cli_value:
+        return cli_value
+    env = os.environ.get("HF_HOME")
+    if env:
+        return env
+    return str(Path.home() / ".cache" / "huggingface")
+
+
 def main():
     p = argparse.ArgumentParser(
         description="FunASR multi-speaker meeting transcription with speaker diarization",
@@ -1268,6 +1306,20 @@ def main():
     p.add_argument("--model-cache-dir", type=str, default=None,
                    help="Directory for ModelScope model cache (~3GB). "
                         "Sets MODELSCOPE_CACHE env var. Default: ~/.cache/modelscope/")
+    p.add_argument("--mimo-audio-tag", default="<chinese>",
+                   choices=["<chinese>", "<english>", "<auto>"],
+                   help="MiMo language hint (default: <chinese>). "
+                        "Only used with --lang mimo.")
+    p.add_argument("--mimo-batch", type=int, default=1,
+                   help="Concurrent VAD segments per MiMo inference call "
+                        "(default: 1). Increase only on H100/80GB+ cards.")
+    p.add_argument("--mimo-weights-path", type=str, default=None,
+                   help="Cache directory for MiMo weights. "
+                        "Default: $HF_HOME, then ~/.cache/huggingface. "
+                        "Also honored by setup_mimo.sh.")
+    p.add_argument("--resume-mimo", action="store_true",
+                   help="Resume MiMo Phase 1 from *_mimo_partial.json "
+                        "(after a mid-run failure).")
     # Backwards compatibility
     p.add_argument("--bedrock-model", type=str, default=None,
                    help=argparse.SUPPRESS)  # Deprecated, use --model
@@ -1319,6 +1371,13 @@ def main():
         print(f"  Warning: --hotwords ignored for --lang {args.lang} "
               f"(only supported with --lang zh / SeACo-Paraformer)")
         hotwords = None
+
+    # MiMo-specific flag compatibility warnings
+    if args.lang == "mimo":
+        resolved_compat = warn_on_incompatible_flags(
+            args.lang, hotwords, args.batch_size, default_batch=300,
+        )
+        hotwords = resolved_compat["hotwords"]
 
     # Load reference materials
     reference_text = None
@@ -1383,8 +1442,26 @@ def main():
         if not audio_path.exists():
             print(f"Error: {audio_path} not found")
             sys.exit(1)
-        transcript = transcribe_with_funasr(asr_audio, args.lang, num_speakers,
-                                            args.device, args.batch_size, hotwords)
+        if args.lang == "mimo":
+            import mimo_asr
+            mimo_weights = resolve_mimo_weights_path(args.mimo_weights_path)
+            os.environ["HF_HOME"] = mimo_weights  # propagate to HF libs
+            transcript = mimo_asr.transcribe_with_mimo(
+                asr_audio,
+                num_speakers=num_speakers,
+                audio_tag=args.mimo_audio_tag,
+                batch=args.mimo_batch,
+                weights_path=mimo_weights,
+                resume=args.resume_mimo,
+                device=args.device,
+                spk_model_id=preset["spk"],
+                vad_model_id=preset["vad"],
+            )
+        else:
+            transcript = transcribe_with_funasr(
+                asr_audio, args.lang, num_speakers,
+                args.device, args.batch_size, hotwords,
+            )
         with open(raw_json, "w", encoding="utf-8") as f:
             json.dump(transcript, f, ensure_ascii=False, indent=2)
         print(f"Raw transcript saved: {raw_json}")

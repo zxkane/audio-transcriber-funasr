@@ -377,3 +377,45 @@ class TestTranscribeWithMimo:
         assert out[2]["text"] == "done"
         assert mimo_inst.asr_sft.call_count == 2  # only 2 new calls
         assert not partial.exists()  # cleaned on success
+
+
+class TestCliWiring:
+    def test_lang_mimo_in_supported(self):
+        import transcribe_funasr as tf
+        assert "mimo" in tf.SUPPORTED_LANGS
+        assert "mimo" in tf.MODEL_PRESETS
+
+    def test_hotwords_warning_with_mimo(self, capsys):
+        import transcribe_funasr as tf
+        resolved = tf.warn_on_incompatible_flags(
+            lang="mimo", hotwords="foo bar", batch_size=300, default_batch=300,
+        )
+        captured = capsys.readouterr()
+        assert resolved["hotwords"] is None
+        assert "hotwords" in captured.out.lower()
+
+    def test_batch_size_warning_with_mimo(self, capsys):
+        import transcribe_funasr as tf
+        tf.warn_on_incompatible_flags(
+            lang="mimo", hotwords=None, batch_size=100, default_batch=300,
+        )
+        captured = capsys.readouterr()
+        assert "batch-size" in captured.out.lower() or "batch_size" in captured.out.lower()
+
+    def test_no_warning_with_zh(self, capsys):
+        import transcribe_funasr as tf
+        tf.warn_on_incompatible_flags(
+            lang="zh", hotwords="foo", batch_size=300, default_batch=300,
+        )
+        captured = capsys.readouterr()
+        assert captured.out.strip() == ""
+
+    def test_weights_path_precedence(self, monkeypatch):
+        import transcribe_funasr as tf
+        monkeypatch.setenv("HF_HOME", "/env/hf")
+        assert tf.resolve_mimo_weights_path("/cli/hf") == "/cli/hf"
+        assert tf.resolve_mimo_weights_path(None) == "/env/hf"
+        monkeypatch.delenv("HF_HOME", raising=False)
+        assert tf.resolve_mimo_weights_path(None) == str(
+            Path.home() / ".cache" / "huggingface"
+        )

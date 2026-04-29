@@ -644,6 +644,10 @@ def rescore_montage_speakers(transcript: list, montage_end: int,
             if result and isinstance(result, list) and len(result) > 0:
                 emb = result[0].get("spk_embedding")
                 if emb is not None:
+                    # CAM++ returns a CUDA torch.Tensor when running on GPU;
+                    # np.array(cuda_tensor) raises. Move to CPU first.
+                    if hasattr(emb, "detach"):
+                        emb = emb.detach().cpu().numpy()
                     arr = np.array(emb, dtype=np.float32).flatten()
                     return arr
         except Exception as e:

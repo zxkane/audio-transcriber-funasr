@@ -79,6 +79,44 @@ def require_mimo_installed(weights_path: str, repo_path: str) -> None:
             ) from e
 
 
+def _cuda_cleanup() -> None:
+    """Best-effort VRAM defragmentation between retry attempts."""
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
+def infer_with_retry(mimo, audio_path: str, audio_tag: str,
+                     max_retries: int = 3,
+                     backoffs: Sequence[float] = (0.5, 2.0, 5.0)) -> str:
+    """Call mimo.asr_sft with up to max_retries attempts. Raises on final failure.
+
+    Between attempts, run gc + torch.cuda.empty_cache() to recover from
+    fragmentation-driven OOMs. Re-raises the last exception wrapped with a
+    clear "after N retries" message so callers can distinguish retry
+    exhaustion from a single unrecoverable failure.
+    """
+    last_exc: Optional[BaseException] = None
+    for attempt in range(max_retries):
+        if attempt > 0:
+            _cuda_cleanup()
+            time.sleep(backoffs[min(attempt - 1, len(backoffs) - 1)])
+        try:
+            return mimo.asr_sft(audio_path, audio_tag=audio_tag)
+        except Exception as e:
+            last_exc = e
+            err_class = type(e).__name__
+            print(f"    attempt {attempt + 1}/{max_retries} failed: {err_class}: {e}")
+    raise RuntimeError(
+        f"MiMo inference failed after {max_retries} retries: "
+        f"{type(last_exc).__name__}: {last_exc}"
+    ) from last_exc
+
+
 def transcribe_with_mimo(audio_path: str,
                          num_speakers: Optional[int] = None,
                          audio_tag: str = "<chinese>",

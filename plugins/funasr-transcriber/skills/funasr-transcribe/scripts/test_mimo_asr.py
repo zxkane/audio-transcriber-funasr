@@ -142,3 +142,36 @@ class TestPartialState:
                               [[0, 100]], [], {"idx": 0, "error": "x"})
         with pytest.raises(RuntimeError, match=r"audio_tag"):
             mimo_asr.load_partial(partial, "sha256:X", "<english>")
+
+
+class TestInferWithRetry:
+    def test_first_attempt_success(self):
+        mimo = MagicMock()
+        mimo.asr_sft.return_value = "hello world"
+        text = mimo_asr.infer_with_retry(mimo, "/tmp/a.wav", "<chinese>",
+                                         max_retries=3, backoffs=[0.0, 0.0, 0.0])
+        assert text == "hello world"
+        assert mimo.asr_sft.call_count == 1
+
+    def test_retry_then_success(self):
+        mimo = MagicMock()
+        mimo.asr_sft.side_effect = [
+            RuntimeError("CUDA OOM"),
+            RuntimeError("CUDA OOM"),
+            "clean text",
+        ]
+        with patch.object(mimo_asr, "_cuda_cleanup") as cleanup:
+            text = mimo_asr.infer_with_retry(mimo, "/tmp/a.wav", "<chinese>",
+                                             max_retries=3, backoffs=[0.0, 0.0, 0.0])
+        assert text == "clean text"
+        assert mimo.asr_sft.call_count == 3
+        assert cleanup.call_count == 2  # called before each retry
+
+    def test_all_attempts_fail_raises(self):
+        mimo = MagicMock()
+        mimo.asr_sft.side_effect = RuntimeError("CUDA OOM")
+        with patch.object(mimo_asr, "_cuda_cleanup"):
+            with pytest.raises(RuntimeError, match=r"after 3 retries"):
+                mimo_asr.infer_with_retry(mimo, "/tmp/a.wav", "<chinese>",
+                                          max_retries=3, backoffs=[0.0, 0.0, 0.0])
+        assert mimo.asr_sft.call_count == 3

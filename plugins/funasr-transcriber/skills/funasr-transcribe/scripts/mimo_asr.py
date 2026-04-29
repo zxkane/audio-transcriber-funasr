@@ -63,13 +63,11 @@ def require_mimo_installed(weights_path: str, repo_path: str) -> None:
             f"Run: INSTALL_MIMO=1 bash $SCRIPTS/setup_env.sh"
         )
 
-    from huggingface_hub import snapshot_download
     from huggingface_hub.errors import LocalEntryNotFoundError
     for repo_id in ("XiaomiMiMo/MiMo-V2.5-ASR",
                     "XiaomiMiMo/MiMo-Audio-Tokenizer"):
         try:
-            snapshot_download(repo_id, cache_dir=weights_path,
-                              local_files_only=True)
+            _resolve_hf_snapshot(repo_id, weights_path)
         except LocalEntryNotFoundError as e:
             raise RuntimeError(
                 f"MiMo weights not found at {weights_path} "
@@ -77,6 +75,32 @@ def require_mimo_installed(weights_path: str, repo_path: str) -> None:
                 f"Run: INSTALL_MIMO=1 MIMO_WEIGHTS_PATH={weights_path} "
                 f"bash $SCRIPTS/setup_env.sh"
             ) from e
+
+
+def _resolve_hf_snapshot(repo_id: str, weights_path: str) -> str:
+    """Resolve a local HF snapshot dir, handling both cache layouts.
+
+    huggingface_hub uses two conventions that are NOT interchangeable:
+    - `HF_HOME=$X` → weights land under `$X/hub/models--.../snapshots/<rev>/`
+    - `snapshot_download(cache_dir=$X)` → weights land under
+      `$X/models--.../snapshots/<rev>/` (no `hub/` subdir)
+
+    `MIMO_WEIGHTS_PATH` is described to users as an `HF_HOME`-style path
+    (and setup_mimo.sh sets it that way), so the hub subdir is what ends
+    up on disk. But passing that same path as `cache_dir=` fails. Probe
+    both layouts and return the one that resolves.
+    """
+    from huggingface_hub import snapshot_download
+    from huggingface_hub.errors import LocalEntryNotFoundError
+    hub_path = str(Path(weights_path) / "hub")
+    last_exc: Optional[BaseException] = None
+    for candidate in (hub_path, weights_path):
+        try:
+            return snapshot_download(repo_id, cache_dir=candidate,
+                                     local_files_only=True)
+        except LocalEntryNotFoundError as e:
+            last_exc = e
+    raise last_exc  # type: ignore[misc]
 
 
 def _cuda_cleanup() -> None:
@@ -124,14 +148,11 @@ def _format_time(ms: int) -> str:
 
 def _load_mimo(weights_path: str):
     """Resolve snapshot dirs and instantiate MimoAudio. Isolated for test mocking."""
-    from huggingface_hub import snapshot_download
     venv_root = Path(sys.prefix)
     sys.path.insert(0, str(venv_root / "mimo"))
     from src.mimo_audio.mimo_audio import MimoAudio  # type: ignore
-    model_dir = snapshot_download("XiaomiMiMo/MiMo-V2.5-ASR",
-                                  cache_dir=weights_path, local_files_only=True)
-    tokenizer_dir = snapshot_download("XiaomiMiMo/MiMo-Audio-Tokenizer",
-                                      cache_dir=weights_path, local_files_only=True)
+    model_dir = _resolve_hf_snapshot("XiaomiMiMo/MiMo-V2.5-ASR", weights_path)
+    tokenizer_dir = _resolve_hf_snapshot("XiaomiMiMo/MiMo-Audio-Tokenizer", weights_path)
     return MimoAudio(model_path=model_dir, tokenizer_path=tokenizer_dir)
 
 

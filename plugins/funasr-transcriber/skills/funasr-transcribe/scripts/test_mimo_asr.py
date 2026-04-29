@@ -402,6 +402,66 @@ class TestExtractSegmentValidation:
                                      0, 1000, str(out_dir))
 
 
+class TestResolveHfSnapshot:
+    """HF stores weights under hub/ when HF_HOME is set, but not when cache_dir=
+    is passed directly. The resolver must probe both layouts so MIMO_WEIGHTS_PATH
+    (which users set as HF_HOME-style) works as the cache_dir argument.
+    """
+
+    def test_resolves_via_hub_subdir(self, tmp_path):
+        """Download was done via HF_HOME → weights are under weights_path/hub/."""
+        from huggingface_hub.errors import LocalEntryNotFoundError
+        calls = []
+
+        def fake_snapshot_download(repo_id, cache_dir, local_files_only):
+            calls.append(cache_dir)
+            if cache_dir.endswith("/hub"):
+                return f"{cache_dir}/models--{repo_id.replace('/', '--')}/snapshots/abc"
+            raise LocalEntryNotFoundError("not at top")
+
+        fake_hf = MagicMock()
+        fake_hf.snapshot_download.side_effect = fake_snapshot_download
+        fake_errs = MagicMock()
+        fake_errs.LocalEntryNotFoundError = LocalEntryNotFoundError
+        with patch.dict(sys.modules, {"huggingface_hub": fake_hf,
+                                      "huggingface_hub.errors": fake_errs}):
+            path = mimo_asr._resolve_hf_snapshot("XiaomiMiMo/MiMo-V2.5-ASR",
+                                                 str(tmp_path))
+        assert path.endswith("/snapshots/abc")
+        assert calls[0].endswith("/hub")  # tried hub/ first
+
+    def test_resolves_via_bare_cache_dir(self, tmp_path):
+        """Download was done via cache_dir= directly → no hub/ subdir."""
+        from huggingface_hub.errors import LocalEntryNotFoundError
+
+        def fake_snapshot_download(repo_id, cache_dir, local_files_only):
+            if not cache_dir.endswith("/hub"):
+                return f"{cache_dir}/models--{repo_id.replace('/', '--')}/snapshots/xyz"
+            raise LocalEntryNotFoundError("not under hub/")
+
+        fake_hf = MagicMock()
+        fake_hf.snapshot_download.side_effect = fake_snapshot_download
+        fake_errs = MagicMock()
+        fake_errs.LocalEntryNotFoundError = LocalEntryNotFoundError
+        with patch.dict(sys.modules, {"huggingface_hub": fake_hf,
+                                      "huggingface_hub.errors": fake_errs}):
+            path = mimo_asr._resolve_hf_snapshot("XiaomiMiMo/MiMo-V2.5-ASR",
+                                                 str(tmp_path))
+        assert path.endswith("/snapshots/xyz")
+
+    def test_both_layouts_missing_raises(self, tmp_path):
+        from huggingface_hub.errors import LocalEntryNotFoundError
+        fake_hf = MagicMock()
+        fake_hf.snapshot_download.side_effect = LocalEntryNotFoundError("missing")
+        fake_errs = MagicMock()
+        fake_errs.LocalEntryNotFoundError = LocalEntryNotFoundError
+        with patch.dict(sys.modules, {"huggingface_hub": fake_hf,
+                                      "huggingface_hub.errors": fake_errs}):
+            with pytest.raises(LocalEntryNotFoundError):
+                mimo_asr._resolve_hf_snapshot("XiaomiMiMo/MiMo-V2.5-ASR",
+                                               str(tmp_path))
+
+
 class TestCliWiring:
     def test_lang_mimo_in_supported(self):
         import transcribe_funasr as tf
